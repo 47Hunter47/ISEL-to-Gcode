@@ -1,2 +1,2 @@
-# ISEL-to-Gcode
-an executable file for windows to convert ISEL to G-code cnc programs
+Converts the ISEL format CNC (NC) codes to standard G-code 
+Without any tool changer function
