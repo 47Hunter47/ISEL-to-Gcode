@@ -18,6 +18,9 @@ BTN = "#2d2d2d"
 
 
 def convert_file(input_path, output_path, log):
+    total_time_min = 0.0
+    current_feed = None
+    last_pos = {"X": None, "Y": None, "Z": None}
     line_no = 1
 
     def nline():
@@ -26,9 +29,16 @@ def convert_file(input_path, output_path, log):
         line_no += 1
         return s
 
+    def move_distance(p1, p2):
+        dist = 0.0
+        for a in ["X", "Y", "Z"]:
+            if p1[a] is not None and p2[a] is not None:
+                dist += (p2[a] - p1[a]) ** 2
+        return dist ** 0.5
+
     def parse_coord(text):
         coords = {}
-        for axis in ['X', 'Y', 'Z']:
+        for axis in ["X", "Y", "Z"]:
             m = re.search(rf"{axis}(-?\d+)", text)
             if m:
                 coords[axis] = float(m.group(1)) / SCALE
@@ -54,6 +64,7 @@ def convert_file(input_path, output_path, log):
                 for k, v in c.items():
                     cmd += f" {k}{v:.3f}"
                 gcode.append(nline() + cmd)
+                last_pos.update(c)
 
             elif line.startswith("MOVEABS"):
                 c = parse_coord(line)
@@ -62,22 +73,30 @@ def convert_file(input_path, output_path, log):
                     cmd += f" {k}{v:.3f}"
                 gcode.append(nline() + cmd)
 
+                if current_feed and all(last_pos[a] is not None for a in c):
+                    dist = move_distance(last_pos, c)
+                    total_time_min += dist / current_feed
+
+                last_pos.update(c)
+
             elif line.startswith("VEL"):
                 vel = int(re.search(r"VEL\s*(\d+)", line).group(1))
-                feed = vel / VEL_RATIO
-                gcode.append(nline() + f"F{feed:.0f}")
-                log(f"Feed: F{feed:.0f}")
+                current_feed = vel / VEL_RATIO
+                gcode.append(nline() + f"F{current_feed:.0f}")
+                log(f"Feed: F{current_feed:.0f}")
 
     gcode += [nline() + "M05", nline() + "M30"]
 
     with open(output_path, "w") as f:
         f.write("\n".join(gcode))
 
+    return total_time_min
+
 
 def run_gui():
     root = TkinterDnD.Tk()
-    root.title(f"ISEL → G-code Dönüştürücü v{APP_VERSION}")
-    root.geometry("500x360")
+    root.title(f"ISEL → G-code Converter v{APP_VERSION}")
+    root.geometry("520x380")
     root.configure(bg=BG)
 
     input_var = tk.StringVar()
@@ -90,7 +109,7 @@ def run_gui():
         path = event.data.strip("{}")
         if os.path.isfile(path):
             input_var.set(path)
-            log(f"Dosya alındı: {path}")
+            log(f"File imported: {path}")
 
     def browse_input():
         input_var.set(
@@ -99,7 +118,7 @@ def run_gui():
 
     def convert():
         if not input_var.get():
-            messagebox.showerror("Hata", "Giriş dosyası seçilmedi")
+            messagebox.showerror("Error", "No input file selected")
             return
 
         in_path = input_var.get()
@@ -115,17 +134,26 @@ def run_gui():
             return
 
         try:
-            convert_file(input_var.get(), out_path, log)
-            messagebox.showinfo("Tamam", f"Dönüştürme tamamlandı:\n{out_path}")
-        except Exception as e:
-            messagebox.showerror("Hata", str(e))
+            total_time = convert_file(in_path, out_path, log)
+            m = int(total_time)
+            s = int((total_time - m) * 60)
 
-    tk.Label(root, text="ISEL Dosyası", bg=BG, fg=FG).pack(pady=5)
+            log(f"⏱ Estimated program time: {m} min {s} sec")
+            log("⚠ Program time may change according to machine parameters")
+
+            messagebox.showinfo(
+                "Completed",
+                f"Conversion finished.\n\nEstimated time:\n{m} min {s} sec"
+            )
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    tk.Label(root, text="ISEL File", bg=BG, fg=FG).pack(pady=5)
 
     entry = tk.Entry(
         root,
         textvariable=input_var,
-        width=55,
+        width=60,
         bg=BTN,
         fg=FG,
         insertbackground=FG
@@ -134,11 +162,11 @@ def run_gui():
     entry.drop_target_register(DND_FILES)
     entry.dnd_bind("<<Drop>>", drop)
 
-    tk.Button(root, text="Gözat", command=browse_input).pack(pady=5)
+    tk.Button(root, text="Browse", command=browse_input).pack(pady=5)
 
     tk.Button(
         root,
-        text="DÖNÜŞTÜR",
+        text="Convert",
         bg="#3a7afe",
         fg="white",
         command=convert
@@ -146,7 +174,7 @@ def run_gui():
 
     logbox = tk.Text(
         root,
-        height=8,
+        height=9,
         bg="#121212",
         fg="#00ff88",
         insertbackground="white"
