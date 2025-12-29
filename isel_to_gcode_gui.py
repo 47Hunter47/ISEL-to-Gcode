@@ -20,7 +20,7 @@ BTN = "#2d2d2d"
 def convert_file(input_path, output_path, log):
     total_time_min = 0.0
     current_feed = None
-    last_pos = {"X": None, "Y": None, "Z": None}
+    last_pos = {"X": 0.0, "Y": 0.0, "Z": 0.0}
     line_no = 1
 
     def nline():
@@ -30,11 +30,11 @@ def convert_file(input_path, output_path, log):
         return s
 
     def move_distance(p1, p2):
-        dist = 0.0
-        for a in ["X", "Y", "Z"]:
-            if p1[a] is not None and p2[a] is not None:
-                dist += (p2[a] - p1[a]) ** 2
-        return dist ** 0.5
+        return (
+            (p2["X"] - p1["X"]) ** 2 +
+            (p2["Y"] - p1["Y"]) ** 2 +
+            (p2["Z"] - p1["Z"]) ** 2
+        ) ** 0.5
 
     def parse_coord(text):
         coords = {}
@@ -49,7 +49,6 @@ def convert_file(input_path, output_path, log):
     with open(input_path) as f:
         for line in f:
             line = line.strip()
-
             if not line or line.startswith(";"):
                 continue
 
@@ -60,24 +59,32 @@ def convert_file(input_path, output_path, log):
 
             elif line.startswith("FASTABS"):
                 c = parse_coord(line)
+                target = last_pos.copy()
+                target.update(c)
+
                 cmd = "G0"
-                for k, v in c.items():
-                    cmd += f" {k}{v:.3f}"
+                for k in ["X", "Y", "Z"]:
+                    cmd += f" {k}{target[k]:.3f}"
+
                 gcode.append(nline() + cmd)
-                last_pos.update(c)
+                last_pos = target
 
             elif line.startswith("MOVEABS"):
                 c = parse_coord(line)
+                target = last_pos.copy()
+                target.update(c)
+
                 cmd = "G1"
-                for k, v in c.items():
-                    cmd += f" {k}{v:.3f}"
+                for k in ["X", "Y", "Z"]:
+                    cmd += f" {k}{target[k]:.3f}"
+
                 gcode.append(nline() + cmd)
 
-                if current_feed and all(last_pos[a] is not None for a in c):
-                    dist = move_distance(last_pos, c)
+                if current_feed:
+                    dist = move_distance(last_pos, target)
                     total_time_min += dist / current_feed
 
-                last_pos.update(c)
+                last_pos = target
 
             elif line.startswith("VEL"):
                 vel = int(re.search(r"VEL\s*(\d+)", line).group(1))
@@ -91,7 +98,6 @@ def convert_file(input_path, output_path, log):
         f.write("\n".join(gcode))
 
     return total_time_min
-
 
 def run_gui():
     root = TkinterDnD.Tk()
@@ -186,3 +192,4 @@ def run_gui():
 
 if __name__ == "__main__":
     run_gui()
+
