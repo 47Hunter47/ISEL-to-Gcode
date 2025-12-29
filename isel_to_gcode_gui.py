@@ -30,7 +30,12 @@ def convert_file(input_path, output_path, log):
         for line in f:
             line = line.strip()
 
-            if line.startswith("SPINDLE CW"):
+            #if line.startswith("GETTOOL"):
+            #    tool = re.search(r"GETTOOL (\d+)", line).group(1)
+            #    gcode.append(nline() + f"T{tool} M06")
+            #    log("Takım değiştirildi")
+
+            elif line.startswith("SPINDLE CW"):
                 rpm = re.search(r"RPM(\d+)", line).group(1)
                 gcode.append(nline() + f"S{rpm} M03")
                 log(f"Spindle: {rpm} RPM")
@@ -72,8 +77,7 @@ def run_gui():
         input_var.set(
             filedialog.askopenfilename(
                 filetypes=[
-                    ("ISEL NC Files", "*.nc"),
-                    ("All Files", "*.*")
+                    ("All Files", "*.*")   
                 ]
             )
         )
@@ -83,19 +87,24 @@ def run_gui():
         logbox.see(tk.END)
 
     def convert():
-        if not input_var.get():
-            messagebox.showerror("Hata", "Giriş dosyası seçilmedi")
-            return
+    if not input_var.get():
+        messagebox.showerror("Hata", "Giriş dosyası seçilmedi")
+        return
 
-        in_path = input_var.get()
-        base, _ = os.path.splitext(in_path)
-        out_path = base + ".ngc"
+    out_path = filedialog.asksaveasfilename(
+        defaultextension=".ngc",
+        filetypes=[("G-code Files", "*.ngc"), ("All Files", "*.*")]
+    )
 
-        try:
-            convert_file(in_path, out_path, log)
-            messagebox.showinfo("Tamam", f"Dönüştürme tamamlandı:\n{out_path}")
-        except Exception as e:
-            messagebox.showerror("Hata", str(e))
+    if not out_path:
+        return
+
+    try:
+        convert_file(input_var.get(), out_path, log)
+        messagebox.showinfo("Tamam", f"Dönüştürme tamamlandı:\n{out_path}")
+    except Exception as e:
+        messagebox.showerror("Hata", str(e))
+
 
     tk.Label(root, text="ISEL (.nc) Dosyası").pack()
     tk.Entry(root, textvariable=input_var, width=50).pack()
@@ -117,4 +126,3 @@ def run_gui():
 
 if __name__ == "__main__":
     run_gui()
-
