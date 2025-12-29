@@ -30,12 +30,10 @@ def convert_file(input_path, output_path, log):
         for line in f:
             line = line.strip()
 
-            #if line.startswith("GETTOOL"):
-            #    tool = re.search(r"GETTOOL (\d+)", line).group(1)
-            #    gcode.append(nline() + f"T{tool} M06")
-            #    log("Takım değiştirildi")
+            if not line or line.startswith(";"):
+                continue
 
-            elif line.startswith("SPINDLE CW"):
+            if line.startswith("SPINDLE CW"):
                 rpm = re.search(r"RPM(\d+)", line).group(1)
                 gcode.append(nline() + f"S{rpm} M03")
                 log(f"Spindle: {rpm} RPM")
@@ -55,7 +53,7 @@ def convert_file(input_path, output_path, log):
                 gcode.append(nline() + cmd)
 
             elif line.startswith("VEL"):
-                vel = int(line.split()[1])
+                vel = int(re.search(r"VEL\s*(\d+)", line).group(1))
                 feed = vel / VEL_RATIO
                 gcode.append(nline() + f"F{feed:.0f}")
                 log(f"Feed: F{feed:.0f}")
@@ -76,9 +74,7 @@ def run_gui():
     def browse_input():
         input_var.set(
             filedialog.askopenfilename(
-                filetypes=[
-                    ("All Files", "*.*")   
-                ]
+                filetypes=[("All Files", "*.*")]
             )
         )
 
@@ -87,26 +83,25 @@ def run_gui():
         logbox.see(tk.END)
 
     def convert():
-    if not input_var.get():
-        messagebox.showerror("Hata", "Giriş dosyası seçilmedi")
-        return
+        if not input_var.get():
+            messagebox.showerror("Hata", "Giriş dosyası seçilmedi")
+            return
 
-    out_path = filedialog.asksaveasfilename(
-        defaultextension=".ngc",
-        filetypes=[("G-code Files", "*.ngc"), ("All Files", "*.*")]
-    )
+        out_path = filedialog.asksaveasfilename(
+            defaultextension=".ngc",
+            filetypes=[("G-code Files", "*.ngc"), ("All Files", "*.*")]
+        )
 
-    if not out_path:
-        return
+        if not out_path:
+            return
 
-    try:
-        convert_file(input_var.get(), out_path, log)
-        messagebox.showinfo("Tamam", f"Dönüştürme tamamlandı:\n{out_path}")
-    except Exception as e:
-        messagebox.showerror("Hata", str(e))
+        try:
+            convert_file(input_var.get(), out_path, log)
+            messagebox.showinfo("Tamam", f"Dönüştürme tamamlandı:\n{out_path}")
+        except Exception as e:
+            messagebox.showerror("Hata", str(e))
 
-
-    tk.Label(root, text="ISEL (.nc) Dosyası").pack()
+    tk.Label(root, text="ISEL Dosyası").pack()
     tk.Entry(root, textvariable=input_var, width=50).pack()
     tk.Button(root, text="Gözat", command=browse_input).pack(pady=5)
 
