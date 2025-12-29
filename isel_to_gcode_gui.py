@@ -1,7 +1,7 @@
 try:
     from version import APP_VERSION
 except ImportError:
-    APP_VERSION = "dev"
+    APP_VERSION = "1.0"
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -102,8 +102,12 @@ def run_gui():
             messagebox.showerror("Hata", "Giriş dosyası seçilmedi")
             return
 
+        in_path = input_var.get()
+        base = os.path.splitext(os.path.basename(in_path))[0]
+
         out_path = filedialog.asksaveasfilename(
             defaultextension=".ngc",
+            initialfile=base + ".ngc",
             filetypes=[("G-code Files", "*.ngc"), ("All Files", "*.*")]
         )
 
