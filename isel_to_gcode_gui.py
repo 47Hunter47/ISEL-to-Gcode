@@ -28,14 +28,13 @@ Z_SCALE = 25
 CANVAS_SIZE = 420
 # ----------------------------------------
 
-
 def parse_isel(input_path):
     moves = []
-    last = {"X": 0, "Y": 0, "Z": 0}
+    last = {"X": 0.0, "Y": 0.0, "Z": 0.0}
 
-    def get_coord(axis, text):
+    def get(axis, text):
         m = re.search(rf"{axis}(-?\d+)", text)
-        return float(m.group(1)) / SCALE if m else None
+        return float(m.group(1)) / SCALE if m else last[axis]
 
     with open(input_path) as f:
         for line in f:
@@ -43,24 +42,19 @@ def parse_isel(input_path):
             if not line:
                 continue
 
-            if line.startswith("FASTABS") or line.startswith("MOVEABS"):
+            if line.startswith(("FASTABS", "MOVEABS")):
                 mode = "G0" if line.startswith("FASTABS") else "G1"
 
-                x = get_coord("X", line)
-                y = get_coord("Y", line)
-                z = get_coord("Z", line)
-
                 new = {
-                    "X": last["X"] if x is None else x,
-                    "Y": last["Y"] if y is None else y,
-                    "Z": last["Z"] if z is None else z,
+                    "X": get("X", line),
+                    "Y": get("Y", line),
+                    "Z": get("Z", line),
                 }
 
                 moves.append((mode, last.copy(), new.copy()))
                 last = new
 
     return moves
-
 
 def iso(x, y, z):
     ix = (x - y) * ISO_SCALE
@@ -232,4 +226,5 @@ def run_gui():
 
 if __name__ == "__main__":
     run_gui()
+
 
