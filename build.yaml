@@ -26,11 +26,12 @@ jobs:
 
       - name: Build EXE
         run: |
-          pyinstaller --onefile --windowed --icon=icon.ico isel_to_gcode_gui.py
+          pyinstaller --onefile --windowed --icon=icon.ico --version-file=version_info.txt isel_to_gcode_gui.py
 
       - name: Upload EXE
         uses: actions/upload-artifact@v4
         with:
           name: isel_to_gcode_gui
           path: dist/isel_to_gcode_gui.exe
+
 
