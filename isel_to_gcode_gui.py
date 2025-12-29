@@ -1,10 +1,20 @@
+try:
+    from version import APP_VERSION
+except ImportError:
+    APP_VERSION = "dev"
+
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from tkinterdnd2 import DND_FILES, TkinterDnD
 import re
 import os
 
 SCALE = 1000.0
 VEL_RATIO = 16.6667
+
+BG = "#1e1e1e"
+FG = "#ffffff"
+BTN = "#2d2d2d"
 
 
 def convert_file(input_path, output_path, log):
@@ -65,22 +75,27 @@ def convert_file(input_path, output_path, log):
 
 
 def run_gui():
-    root = tk.Tk()
-    root.title("ISEL → G-code Dönüştürücü")
-    root.geometry("480x320")
+    root = TkinterDnD.Tk()
+    root.title(f"ISEL → G-code Dönüştürücü v{APP_VERSION}")
+    root.geometry("500x360")
+    root.configure(bg=BG)
 
     input_var = tk.StringVar()
-
-    def browse_input():
-        input_var.set(
-            filedialog.askopenfilename(
-                filetypes=[("All Files", "*.*")]
-            )
-        )
 
     def log(msg):
         logbox.insert(tk.END, msg + "\n")
         logbox.see(tk.END)
+
+    def drop(event):
+        path = event.data.strip("{}")
+        if os.path.isfile(path):
+            input_var.set(path)
+            log(f"Dosya alındı: {path}")
+
+    def browse_input():
+        input_var.set(
+            filedialog.askopenfilename(filetypes=[("All Files", "*.*")])
+        )
 
     def convert():
         if not input_var.get():
@@ -101,19 +116,37 @@ def run_gui():
         except Exception as e:
             messagebox.showerror("Hata", str(e))
 
-    tk.Label(root, text="ISEL Dosyası").pack()
-    tk.Entry(root, textvariable=input_var, width=50).pack()
+    tk.Label(root, text="ISEL Dosyası", bg=BG, fg=FG).pack(pady=5)
+
+    entry = tk.Entry(
+        root,
+        textvariable=input_var,
+        width=55,
+        bg=BTN,
+        fg=FG,
+        insertbackground=FG
+    )
+    entry.pack()
+    entry.drop_target_register(DND_FILES)
+    entry.dnd_bind("<<Drop>>", drop)
+
     tk.Button(root, text="Gözat", command=browse_input).pack(pady=5)
 
     tk.Button(
         root,
         text="DÖNÜŞTÜR",
-        bg="green",
+        bg="#3a7afe",
         fg="white",
         command=convert
     ).pack(pady=10)
 
-    logbox = tk.Text(root, height=8)
+    logbox = tk.Text(
+        root,
+        height=8,
+        bg="#121212",
+        fg="#00ff88",
+        insertbackground="white"
+    )
     logbox.pack(fill="both", expand=True)
 
     root.mainloop()
