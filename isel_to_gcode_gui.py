@@ -18,23 +18,14 @@ BTN = "#2d2d2d"
 
 
 def convert_file(input_path, output_path, log):
-    total_time_min = 0.0
-    current_feed = None
-    last_pos = {"X": 0.0, "Y": 0.0, "Z": 0.0}
     line_no = 1
+    first_positioning_done = False
 
     def nline():
         nonlocal line_no
         s = f"N{line_no:05d} "
         line_no += 1
         return s
-
-    def move_distance(p1, p2):
-        return (
-            (p2["X"] - p1["X"]) ** 2 +
-            (p2["Y"] - p1["Y"]) ** 2 +
-            (p2["Z"] - p1["Z"]) ** 2
-        ) ** 0.5
 
     def parse_coord(text):
         coords = {}
@@ -46,65 +37,69 @@ def convert_file(input_path, output_path, log):
 
     gcode = ["G21", "G17", "G90"]
 
-    with open(input_path) as f:
+    with open(input_path, "r") as f:
         for line in f:
             line = line.strip()
+
             if not line or line.startswith(";"):
                 continue
 
+            # ---------- SPINDLE ----------
             if line.startswith("SPINDLE CW"):
                 rpm = re.search(r"RPM(\d+)", line).group(1)
                 gcode.append(nline() + f"S{rpm} M03")
                 log(f"Spindle: {rpm} RPM")
 
+            # ---------- FASTABS ----------
             elif line.startswith("FASTABS"):
                 c = parse_coord(line)
-                target = last_pos.copy()
-                target.update(c)
 
-                cmd = "G0"
-                for k in ["X", "Y", "Z"]:
-                    cmd += f" {k}{target[k]:.3f}"
+                # 🟢 SADECE PROGRAM BAŞINDA GÜVENLİ BAŞLANGIÇ
+                if not first_positioning_done and "Z" in c and ("X" in c or "Y" in c):
+                    gcode.append(nline() + f"G0 Z{c['Z']:.3f}")
 
-                gcode.append(nline() + cmd)
-                last_pos = target
+                    xy_cmd = "G0"
+                    if "X" in c:
+                        xy_cmd += f" X{c['X']:.3f}"
+                    if "Y" in c:
+                        xy_cmd += f" Y{c['Y']:.3f}"
 
+                    gcode.append(nline() + xy_cmd)
+                    first_positioning_done = True
+
+                else:
+                    cmd = "G0"
+                    for k, v in c.items():
+                        cmd += f" {k}{v:.3f}"
+                    gcode.append(nline() + cmd)
+
+            # ---------- MOVEABS ----------
             elif line.startswith("MOVEABS"):
                 c = parse_coord(line)
-                target = last_pos.copy()
-                target.update(c)
-
                 cmd = "G1"
-                for k in ["X", "Y", "Z"]:
-                    cmd += f" {k}{target[k]:.3f}"
-
+                for k, v in c.items():
+                    cmd += f" {k}{v:.3f}"
                 gcode.append(nline() + cmd)
 
-                if current_feed:
-                    dist = move_distance(last_pos, target)
-                    total_time_min += dist / current_feed
-
-                last_pos = target
-
+            # ---------- FEED ----------
             elif line.startswith("VEL"):
                 vel = int(re.search(r"VEL\s*(\d+)", line).group(1))
-                current_feed = vel / VEL_RATIO
-                gcode.append(nline() + f"F{current_feed:.0f}")
-                log(f"Feed: F{current_feed:.0f}")
+                feed = vel / VEL_RATIO
+                gcode.append(nline() + f"F{feed:.0f}")
+                log(f"Feed: F{feed:.0f}")
 
     gcode += [nline() + "M05", nline() + "M30"]
 
     with open(output_path, "w") as f:
         f.write("\n".join(gcode))
 
-    return total_time_min
 
 def run_gui():
     root = TkinterDnD.Tk()
     root.title(f"ISEL → G-code Converter v{APP_VERSION}")
-    root.geometry("520x380")
+    root.geometry("500x360")
     root.configure(bg=BG)
-    
+
     input_var = tk.StringVar()
     
     try:
@@ -120,7 +115,7 @@ def run_gui():
         path = event.data.strip("{}")
         if os.path.isfile(path):
             input_var.set(path)
-            log(f"File imported: {path}")
+            log(f"File loaded: {path}")
 
     def browse_input():
         input_var.set(
@@ -145,17 +140,8 @@ def run_gui():
             return
 
         try:
-            total_time = convert_file(in_path, out_path, log)
-            m = int(total_time)
-            s = int((total_time - m) * 60)
-
-            log(f"⏱ Estimated program time: {m} min {s} sec")
-            log("⚠ Program time may change according to machine parameters")
-
-            messagebox.showinfo(
-                "Completed",
-                f"Conversion finished.\n\nEstimated time:\n{m} min {s} sec"
-            )
+            convert_file(in_path, out_path, log)
+            messagebox.showinfo("OK", f"Conversion completed:\n{out_path}")
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
@@ -164,7 +150,7 @@ def run_gui():
     entry = tk.Entry(
         root,
         textvariable=input_var,
-        width=60,
+        width=55,
         bg=BTN,
         fg=FG,
         insertbackground=FG
@@ -185,7 +171,7 @@ def run_gui():
 
     logbox = tk.Text(
         root,
-        height=9,
+        height=8,
         bg="#121212",
         fg="#00ff88",
         insertbackground="white"
@@ -197,4 +183,3 @@ def run_gui():
 
 if __name__ == "__main__":
     run_gui()
-
