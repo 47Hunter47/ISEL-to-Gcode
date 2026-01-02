@@ -104,8 +104,13 @@ def run_gui():
     root.title(f"ISEL → G-code Converter v{APP_VERSION}")
     root.geometry("520x380")
     root.configure(bg=BG)
-
+    
     input_var = tk.StringVar()
+    
+    try:
+        root.iconbitmap("icon.ico")
+    except Exception:
+        pass
 
     def log(msg):
         logbox.insert(tk.END, msg + "\n")
@@ -192,3 +197,4 @@ def run_gui():
 
 if __name__ == "__main__":
     run_gui()
+
