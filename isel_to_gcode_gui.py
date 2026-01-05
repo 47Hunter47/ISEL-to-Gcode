@@ -1,7 +1,7 @@
 try:
     from version import APP_VERSION
 except ImportError:
-    APP_VERSION = "1.0"
+    APP_VERSION = "1.1"
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -161,6 +161,7 @@ def run_gui():
 
             log(f"⏱ Estimated program time: {m} min {s} sec")
             log("⚠ Program time may change according to machine parameters")
+            log("You can drag&drop a file to be converted")
 
             messagebox.showinfo(
                 "Completed",
@@ -206,3 +207,4 @@ def run_gui():
 
 if __name__ == "__main__":
     run_gui()
+
