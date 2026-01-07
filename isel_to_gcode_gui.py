@@ -62,11 +62,12 @@ def convert_file(input_path, output_path, log):
             elif line.startswith("FASTABS"):
                 c = parse_coord(line)
 
-                # 🔒 SADECE PROGRAM BAŞINDA Z GÜVENLİK
+                # 🔒 SADECE PROGRAM BAŞINDA: SADECE Z GÜVENLİK
                 if not start_done:
                     gcode.append(nline() + f"G0 Z{SAFE_Z:.3f}")
                     last_pos["Z"] = SAFE_Z
                     start_done = True
+                    continue  # ⛔ X/Y içeren bu FASTABS satırını tamamen atla
 
                 target = last_pos.copy()
                 target.update(c)
@@ -205,6 +206,6 @@ def run_gui():
 
     root.mainloop()
 
+
 if __name__ == "__main__":
     run_gui()
-
