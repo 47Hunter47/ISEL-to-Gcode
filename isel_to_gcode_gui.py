@@ -1,10 +1,11 @@
 try:
     from version import APP_VERSION
 except ImportError:
-    APP_VERSION = "1.2"
+    APP_VERSION = "1.3"
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from tkinter import ttk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 import re
 import os
@@ -13,7 +14,7 @@ import math
 SCALE = 1000.0
 VEL_RATIO = 16.6667
 SAFE_Z = 4.0
-ARC_RESOLUTION = 0.01  # mm
+ARC_RESOLUTION = 0.03  # mm
 DEFAULT_FEED = 100.0  # Default feed rate if no VEL command
 
 BG = "#1e1e1e"
@@ -21,7 +22,7 @@ FG = "#ffffff"
 BTN = "#2d2d2d"
 
 
-def convert_file(input_path, output_path, log):
+def convert_file(input_path, output_path, log, progress_callback=None):
     total_time_min = 0.0
     current_feed = None
     last_pos = {"X": 0.0, "Y": 0.0, "Z": 0.0}
@@ -107,11 +108,27 @@ def convert_file(input_path, output_path, log):
     gcode = ["G21", "G17", "G90"]
 
     try:
+        # First pass: count total lines for progress tracking
         with open(input_path, 'r', encoding='utf-8') as f:
+            total_lines = sum(1 for line in f if line.strip() and not line.strip().startswith(";"))
+        
+        if progress_callback:
+            progress_callback(0, "Reading file...")
+
+        with open(input_path, 'r', encoding='utf-8') as f:
+            lines_processed = 0
+            
             for raw in f:
                 line = raw.strip()
                 if not line or line.startswith(";"):
                     continue
+
+                lines_processed += 1
+                
+                # Update progress every 10 lines or for important commands
+                if progress_callback and (lines_processed % 10 == 0 or lines_processed == total_lines):
+                    progress = (lines_processed / total_lines) * 90  # Reserve 10% for file writing
+                    progress_callback(progress, f"Processing line {lines_processed}/{total_lines}")
 
                 try:
                     if line.startswith("SPINDLE CW"):
@@ -214,11 +231,17 @@ def convert_file(input_path, output_path, log):
 
     gcode += [nline() + "M05", nline() + "M30"]
 
+    if progress_callback:
+        progress_callback(95, "Writing output file...")
+
     try:
         with open(output_path, "w", encoding='utf-8') as f:
             f.write("\n".join(gcode))
     except Exception as e:
         raise Exception(f"Error writing output file: {str(e)}")
+
+    if progress_callback:
+        progress_callback(100, "Complete!")
 
     return total_time_min
 
@@ -226,10 +249,11 @@ def convert_file(input_path, output_path, log):
 def run_gui():
     root = TkinterDnD.Tk()
     root.title(f"ISEL → G-code Converter v{APP_VERSION}")
-    root.geometry("520x400")
+    root.geometry("520x450")
     root.configure(bg=BG)
 
     input_var = tk.StringVar()
+    converting = False
 
     try:
         root.iconbitmap("icon.ico")
@@ -240,7 +264,15 @@ def run_gui():
         logbox.insert(tk.END, msg + "\n")
         logbox.see(tk.END)
 
+    def update_progress(value, status_text=""):
+        progress_bar['value'] = value
+        if status_text:
+            progress_label.config(text=status_text)
+        root.update_idletasks()
+
     def drop(event):
+        if converting:
+            return
         path = event.data.strip("{}")
         if os.path.isfile(path):
             input_var.set(path)
@@ -249,12 +281,19 @@ def run_gui():
             log(f"Error: Not a valid file: {path}")
 
     def browse_input():
+        if converting:
+            return
         path = filedialog.askopenfilename(filetypes=[("All Files", "*.*")])
         if path:
             input_var.set(path)
             log(f"File selected: {path}")
 
     def convert():
+        nonlocal converting
+        
+        if converting:
+            return
+            
         if not input_var.get():
             messagebox.showerror("Error", "No input file selected")
             return
@@ -277,13 +316,19 @@ def run_gui():
             return
 
         try:
+            converting = True
+            convert_btn.config(state='disabled', text="Converting...")
+            browse_btn.config(state='disabled')
+            progress_bar['value'] = 0
+            progress_label.config(text="Starting conversion...")
+            
             logbox.delete(1.0, tk.END)
             log("Starting conversion...")
             log(f"Input: {in_path}")
             log(f"Output: {out_path}")
             log("-" * 50)
             
-            total_time = convert_file(in_path, out_path, log)
+            total_time = convert_file(in_path, out_path, log, update_progress)
             
             m = int(total_time)
             s = int((total_time - m) * 60)
@@ -293,6 +338,8 @@ def run_gui():
             log(f"⏱ Estimated program time: {m} min {s} sec")
             log("⚠ Program time may change according to machine parameters")
 
+            progress_label.config(text="Conversion complete!")
+
             messagebox.showinfo(
                 "Completed",
                 f"Conversion finished successfully!\n\nEstimated time:\n{m} min {s} sec"
@@ -300,13 +347,20 @@ def run_gui():
         
         except FileNotFoundError as e:
             log(f"✗ Error: {str(e)}")
+            progress_label.config(text="Error occurred")
             messagebox.showerror("File Error", str(e))
         except UnicodeDecodeError as e:
             log(f"✗ Error: File encoding problem")
+            progress_label.config(text="Error occurred")
             messagebox.showerror("Encoding Error", "Could not read file. Please check file encoding.")
         except Exception as e:
             log(f"✗ Error: {str(e)}")
+            progress_label.config(text="Error occurred")
             messagebox.showerror("Error", f"Conversion failed:\n{str(e)}")
+        finally:
+            converting = False
+            convert_btn.config(state='normal', text="Convert")
+            browse_btn.config(state='normal')
 
     # GUI Layout
     tk.Label(root, text="ISEL File", bg=BG, fg=FG, font=("Arial", 10)).pack(pady=5)
@@ -319,16 +373,17 @@ def run_gui():
     btn_frame = tk.Frame(root, bg=BG)
     btn_frame.pack(pady=10)
 
-    tk.Button(
+    browse_btn = tk.Button(
         btn_frame, 
         text="Browse", 
         command=browse_input,
         bg=BTN,
         fg=FG,
         width=12
-    ).pack(side=tk.LEFT, padx=5)
+    )
+    browse_btn.pack(side=tk.LEFT, padx=5)
 
-    tk.Button(
+    convert_btn = tk.Button(
         btn_frame, 
         text="Convert", 
         bg="#3a7afe", 
@@ -336,11 +391,44 @@ def run_gui():
         command=convert,
         width=12,
         font=("Arial", 10, "bold")
-    ).pack(side=tk.LEFT, padx=5)
+    )
+    convert_btn.pack(side=tk.LEFT, padx=5)
 
+    # Progress bar section
+    progress_frame = tk.Frame(root, bg=BG)
+    progress_frame.pack(pady=5, padx=10, fill=tk.X)
+
+    progress_label = tk.Label(
+        progress_frame, 
+        text="Ready", 
+        bg=BG, 
+        fg=FG, 
+        font=("Arial", 9)
+    )
+    progress_label.pack()
+
+    style = ttk.Style()
+    style.theme_use('default')
+    style.configure(
+        "custom.Horizontal.TProgressbar",
+        troughcolor=BTN,
+        background='#3a7afe',
+        thickness=20
+    )
+
+    progress_bar = ttk.Progressbar(
+        progress_frame,
+        style="custom.Horizontal.TProgressbar",
+        orient='horizontal',
+        mode='determinate',
+        length=480
+    )
+    progress_bar.pack(pady=5)
+
+    # Log section
     tk.Label(root, text="Conversion Log", bg=BG, fg=FG, font=("Arial", 9)).pack(pady=(5, 2))
 
-    logbox = tk.Text(root, height=12, bg="#121212", fg="#00ff88", font=("Consolas", 9))
+    logbox = tk.Text(root, height=10, bg="#121212", fg="#00ff88", font=("Consolas", 9))
     logbox.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
     # Welcome message
