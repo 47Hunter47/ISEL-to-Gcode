@@ -1,17 +1,19 @@
 try:
     from version import APP_VERSION
 except ImportError:
-    APP_VERSION = "1.1"
+    APP_VERSION = "1.2"
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from tkinterdnd2 import DND_FILES, TkinterDnD
 import re
 import os
+import math
 
 SCALE = 1000.0
 VEL_RATIO = 16.6667
 SAFE_Z = 4.0
+ARC_RESOLUTION = 0.01  # mm
 
 BG = "#1e1e1e"
 FG = "#ffffff"
@@ -32,42 +34,84 @@ def convert_file(input_path, output_path, log):
         return s
 
     def move_distance(p1, p2):
-        return (
+        return math.sqrt(
             (p2["X"] - p1["X"]) ** 2 +
             (p2["Y"] - p1["Y"]) ** 2 +
             (p2["Z"] - p1["Z"]) ** 2
-        ) ** 0.5
+        )
 
-    def parse_coord(text):
+    def parse_coord(text, axes=("X", "Y", "Z")):
         coords = {}
-        for axis in ["X", "Y", "Z"]:
+        for axis in axes:
             m = re.search(rf"{axis}(-?\d+)", text)
             if m:
                 coords[axis] = float(m.group(1)) / SCALE
         return coords
 
+    def linearize_arc(start, end, center, cw):
+        nonlocal total_time_min
+
+        sx, sy = start["X"], start["Y"]
+        ex, ey = end["X"], end["Y"]
+        cx, cy = center["X"], center["Y"]
+
+        r = math.hypot(sx - cx, sy - cy)
+        a0 = math.atan2(sy - cy, sx - cx)
+        a1 = math.atan2(ey - cy, ex - cx)
+
+        if cw:
+            if a1 >= a0:
+                a1 -= 2 * math.pi
+        else:
+            if a1 <= a0:
+                a1 += 2 * math.pi
+
+        arc_len = abs(a1 - a0) * r
+        steps = max(1, int(arc_len / ARC_RESOLUTION))
+        da = (a1 - a0) / steps
+
+        pos = start.copy()
+
+        for i in range(1, steps + 1):
+            a = a0 + da * i
+            target = {
+                "X": cx + r * math.cos(a),
+                "Y": cy + r * math.sin(a),
+                "Z": start["Z"]
+            }
+
+            gcode.append(
+                nline() +
+                f"G1 X{target['X']:.3f} Y{target['Y']:.3f} Z{target['Z']:.3f}"
+            )
+
+            if current_feed:
+                total_time_min += move_distance(pos, target) / current_feed
+
+            pos = target
+
+        return pos
+
     gcode = ["G21", "G17", "G90"]
 
     with open(input_path) as f:
-        for line in f:
-            line = line.strip()
+        for raw in f:
+            line = raw.strip()
             if not line or line.startswith(";"):
                 continue
 
             if line.startswith("SPINDLE CW"):
-                rpm = re.search(r"RPM(\d+)", line).group(1)
+                rpm = int(re.search(r"RPM(\d+)", line).group(1))
                 gcode.append(nline() + f"S{rpm} M03")
                 log(f"Spindle: {rpm} RPM")
 
             elif line.startswith("FASTABS"):
                 c = parse_coord(line)
 
-                # 🔒 SADECE PROGRAM BAŞINDA: SADECE Z GÜVENLİK
                 if not start_done:
                     gcode.append(nline() + f"G0 Z{SAFE_Z:.3f}")
                     last_pos["Z"] = SAFE_Z
                     start_done = True
-                    continue  # ⛔ X/Y içeren bu FASTABS satırını tamamen atla
 
                 target = last_pos.copy()
                 target.update(c)
@@ -91,8 +135,7 @@ def convert_file(input_path, output_path, log):
                 gcode.append(nline() + cmd)
 
                 if current_feed:
-                    dist = move_distance(last_pos, target)
-                    total_time_min += dist / current_feed
+                    total_time_min += move_distance(last_pos, target) / current_feed
 
                 last_pos = target
 
@@ -101,6 +144,22 @@ def convert_file(input_path, output_path, log):
                 current_feed = vel / VEL_RATIO
                 gcode.append(nline() + f"F{current_feed:.0f}")
                 log(f"Feed: F{current_feed:.0f}")
+
+            elif line.startswith("CWABS") or line.startswith("CCWABS"):
+                cw = line.startswith("CWABS")
+
+                c = parse_coord(line, axes=("X", "Y"))
+                ij = parse_coord(line, axes=("I", "J"))
+
+                end = last_pos.copy()
+                end.update(c)
+
+                center = {
+                    "X": last_pos["X"] + ij.get("I", 0.0),
+                    "Y": last_pos["Y"] + ij.get("J", 0.0),
+                }
+
+                last_pos = linearize_arc(last_pos, end, center, cw)
 
     gcode += [nline() + "M05", nline() + "M30"]
 
@@ -134,9 +193,7 @@ def run_gui():
             log(f"File imported: {path}")
 
     def browse_input():
-        input_var.set(
-            filedialog.askopenfilename(filetypes=[("All Files", "*.*")])
-        )
+        input_var.set(filedialog.askopenfilename(filetypes=[("All Files", "*.*")]))
 
     def convert():
         if not input_var.get():
@@ -155,53 +212,29 @@ def run_gui():
         if not out_path:
             return
 
-        try:
-            total_time = convert_file(in_path, out_path, log)
-            m = int(total_time)
-            s = int((total_time - m) * 60)
+        total_time = convert_file(in_path, out_path, log)
+        m = int(total_time)
+        s = int((total_time - m) * 60)
 
-            log(f"⏱ Estimated program time: {m} min {s} sec")
-            log("⚠ Program time may change according to machine parameters")
-            log("You can drag&drop a file to be converted")
+        log(f"⏱ Estimated program time: {m} min {s} sec")
+        log("⚠ Program time may change according to machine parameters")
 
-            messagebox.showinfo(
-                "Completed",
-                f"Conversion finished.\n\nEstimated time:\n{m} min {s} sec"
-            )
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
+        messagebox.showinfo(
+            "Completed",
+            f"Conversion finished.\n\nEstimated time:\n{m} min {s} sec"
+        )
 
     tk.Label(root, text="ISEL File", bg=BG, fg=FG).pack(pady=5)
 
-    entry = tk.Entry(
-        root,
-        textvariable=input_var,
-        width=60,
-        bg=BTN,
-        fg=FG,
-        insertbackground=FG
-    )
+    entry = tk.Entry(root, textvariable=input_var, width=60, bg=BTN, fg=FG)
     entry.pack()
     entry.drop_target_register(DND_FILES)
     entry.dnd_bind("<<Drop>>", drop)
 
     tk.Button(root, text="Browse", command=browse_input).pack(pady=5)
+    tk.Button(root, text="Convert", bg="#3a7afe", fg="white", command=convert).pack(pady=10)
 
-    tk.Button(
-        root,
-        text="Convert",
-        bg="#3a7afe",
-        fg="white",
-        command=convert
-    ).pack(pady=10)
-
-    logbox = tk.Text(
-        root,
-        height=9,
-        bg="#121212",
-        fg="#00ff88",
-        insertbackground="white"
-    )
+    logbox = tk.Text(root, height=9, bg="#121212", fg="#00ff88")
     logbox.pack(fill="both", expand=True)
 
     root.mainloop()
