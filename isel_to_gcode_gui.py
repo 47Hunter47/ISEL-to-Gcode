@@ -1,7 +1,7 @@
 try:
     from version import APP_VERSION
 except ImportError:
-    APP_VERSION = "1.4"
+    APP_VERSION = "1.5"
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -12,11 +12,11 @@ import os
 import math
 import threading
 
-SCALE = 1000.0
-VEL_RATIO = 16.6667
-SAFE_Z = 4.0
-ARC_RESOLUTION = 0.05  # mm
-DEFAULT_FEED = 1000.0   # Default feed rate if no VEL command
+SCALE          = 1000.0
+VEL_RATIO      = 16.6667
+SAFE_Z         = 4.0
+ARC_RESOLUTION = 0.05   # mm  (used only when linearising)
+DEFAULT_FEED   = 1000.0
 
 BG  = "#1e1e1e"
 FG  = "#ffffff"
@@ -24,18 +24,16 @@ BTN = "#2d2d2d"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  CORE CONVERSION  (streaming write → no RAM blow-up on huge files)
+#  CORE CONVERSION
 # ─────────────────────────────────────────────────────────────────────────────
 
-def convert_file(input_path, output_path, log, progress_callback=None):
+def convert_file(input_path, output_path, log, progress_callback=None,
+                 use_arc_commands=False):
     """
     Convert an ISEL NC file to G-code.
 
-    Key fix vs. v1.3:
-      • Output is written line-by-line (streaming) instead of building a
-        giant list and joining it at the end.  This prevents MemoryError /
-        "Error writing output file" on large files that produce 500 000+
-        G-code lines after arc linearisation.
+    use_arc_commands=False  → arcs linearised to G1 segments (original behaviour)
+    use_arc_commands=True   → arcs emitted as G2/G3  (much smaller output file)
     """
 
     total_time_min = 0.0
@@ -67,15 +65,49 @@ def convert_file(input_path, output_path, log, progress_callback=None):
                 coords[axis] = float(m.group(1)) / SCALE
         return coords
 
-    # ── arc linearisation ────────────────────────────────────────────────────
-    # Returns (new_pos, list_of_gcode_lines) instead of appending to a global
-    # list so the caller can stream-write them.
+    # ── arc as single G2/G3 line ──────────────────────────────────────────────
+
+    def arc_to_g2g3(start, end, center, cw):
+        """
+        Emit one G2/G3 line using I/J centre offsets.
+        Returns (new_pos, [gcode_line]).
+        """
+        nonlocal total_time_min, current_feed
+
+        i_off = center["X"] - start["X"]
+        j_off = center["Y"] - start["Y"]
+
+        # arc length for time estimate
+        r  = math.hypot(i_off, j_off)
+        a0 = math.atan2(start["Y"] - center["Y"], start["X"] - center["X"])
+        a1 = math.atan2(end["Y"]   - center["Y"], end["X"]   - center["X"])
+
+        if cw:
+            if a1 >= a0:
+                a1 -= 2 * math.pi
+        else:
+            if a1 <= a0:
+                a1 += 2 * math.pi
+
+        arc_len = abs(a1 - a0) * r
+        if current_feed:
+            total_time_min += arc_len / current_feed
+
+        code = "G2" if cw else "G3"
+        gline = (
+            nline() +
+            f"{code} X{end['X']:.3f} Y{end['Y']:.3f} Z{end['Z']:.3f}"
+            f" I{i_off:.3f} J{j_off:.3f}"
+        )
+        return end.copy(), [gline]
+
+    # ── arc as linearised G1 segments ─────────────────────────────────────────
 
     def linearize_arc(start, end, center, cw):
         nonlocal total_time_min, current_feed
 
-        sx, sy = start["X"], start["Y"]
-        ex, ey = end["X"],   end["Y"]
+        sx, sy = start["X"],  start["Y"]
+        ex, ey = end["X"],    end["Y"]
         cx, cy = center["X"], center["Y"]
 
         r  = math.hypot(sx - cx, sy - cy)
@@ -111,7 +143,7 @@ def convert_file(input_path, output_path, log, progress_callback=None):
                 total_time_min += move_distance(pos, target) / current_feed
             pos = target
 
-        # ensure exact end-point
+        # exact end-point correction
         final_pos = end.copy()
         if abs(final_pos["X"] - pos["X"]) > 0.001 or \
            abs(final_pos["Y"] - pos["Y"]) > 0.001:
@@ -125,7 +157,11 @@ def convert_file(input_path, output_path, log, progress_callback=None):
 
         return pos, lines
 
-    # ── first pass: count non-comment lines for progress bar ─────────────────
+    # ── select arc handler once ───────────────────────────────────────────────
+
+    handle_arc = arc_to_g2g3 if use_arc_commands else linearize_arc
+
+    # ── first pass: count lines for progress bar ──────────────────────────────
 
     try:
         with open(input_path, "r", encoding="utf-8", errors="replace") as f:
@@ -141,7 +177,7 @@ def convert_file(input_path, output_path, log, progress_callback=None):
     if progress_callback:
         progress_callback(0, "Reading file...")
 
-    # ── second pass: parse + stream-write ────────────────────────────────────
+    # ── open output & stream-write ────────────────────────────────────────────
 
     try:
         out_f = open(output_path, "w", encoding="utf-8")
@@ -149,11 +185,9 @@ def convert_file(input_path, output_path, log, progress_callback=None):
         raise Exception(f"Cannot open output file for writing: {e}")
 
     def emit(line):
-        """Write one G-code line to the output file."""
         out_f.write(line + "\n")
 
     try:
-        # file header
         for hdr in ("G21", "G17", "G90"):
             emit(hdr)
 
@@ -172,8 +206,7 @@ def convert_file(input_path, output_path, log, progress_callback=None):
                 ):
                     pct = (lines_processed / total_lines) * 90
                     progress_callback(
-                        pct,
-                        f"Processing line {lines_processed}/{total_lines}"
+                        pct, f"Processing line {lines_processed}/{total_lines}"
                     )
 
                 try:
@@ -187,7 +220,7 @@ def convert_file(input_path, output_path, log, progress_callback=None):
                         else:
                             log(f"Warning: Could not parse RPM from: {line}")
 
-                    # ── FASTABS (rapid move) ──────────────────────────────
+                    # ── FASTABS ───────────────────────────────────────────
                     elif line.startswith("FASTABS"):
                         c = parse_coord(line)
 
@@ -206,7 +239,7 @@ def convert_file(input_path, output_path, log, progress_callback=None):
                         emit(nline() + cmd)
                         last_pos = target
 
-                    # ── MOVEABS (feed move) ───────────────────────────────
+                    # ── MOVEABS ───────────────────────────────────────────
                     elif line.startswith("MOVEABS"):
                         c      = parse_coord(line)
                         target = last_pos.copy()
@@ -226,7 +259,7 @@ def convert_file(input_path, output_path, log, progress_callback=None):
                             total_time_min += move_distance(last_pos, target) / current_feed
                         last_pos = target
 
-                    # ── VEL (feed rate) ───────────────────────────────────
+                    # ── VEL ───────────────────────────────────────────────
                     elif line.startswith("VEL"):
                         m = re.search(r"VEL\s*(\d+)", line)
                         if m:
@@ -237,7 +270,7 @@ def convert_file(input_path, output_path, log, progress_callback=None):
                         else:
                             log(f"Warning: Could not parse VEL from: {line}")
 
-                    # ── CWABS / CCWABS (arc move) ─────────────────────────
+                    # ── CWABS / CCWABS ────────────────────────────────────
                     elif line.startswith("CWABS") or line.startswith("CCWABS"):
                         cw = line.startswith("CWABS")
 
@@ -246,8 +279,8 @@ def convert_file(input_path, output_path, log, progress_callback=None):
                             emit(nline() + f"F{current_feed:.0f}")
                             log(f"Warning: No VEL command found, using default F{current_feed:.0f}")
 
-                        c   = parse_coord(line, axes=("X", "Y", "Z"))
-                        ij  = parse_coord(line, axes=("I", "J"))
+                        c  = parse_coord(line, axes=("X", "Y", "Z"))
+                        ij = parse_coord(line, axes=("I", "J"))
 
                         end    = last_pos.copy()
                         end.update(c)
@@ -257,11 +290,9 @@ def convert_file(input_path, output_path, log, progress_callback=None):
                             "Y": last_pos["Y"] + ij.get("J", 0.0),
                         }
 
-                        new_pos, arc_lines = linearize_arc(last_pos, end, center, cw)
-
+                        new_pos, arc_lines = handle_arc(last_pos, end, center, cw)
                         for al in arc_lines:
                             emit(al)
-
                         last_pos = new_pos
 
                 except Exception as e:
@@ -269,7 +300,6 @@ def convert_file(input_path, output_path, log, progress_callback=None):
                     log(f"  Error: {e}")
                     continue
 
-        # footer
         emit(nline() + "M05")
         emit(nline() + "M30")
 
@@ -289,18 +319,17 @@ def convert_file(input_path, output_path, log, progress_callback=None):
 def run_gui():
     root = TkinterDnD.Tk()
     root.title(f"ISEL → G-code Converter v{APP_VERSION}")
-    root.geometry("520x450")
+    root.geometry("520x490")
     root.configure(bg=BG)
 
-    input_var  = tk.StringVar()
-    converting = False          # flag (plain bool – GUI runs on main thread)
+    input_var   = tk.StringVar()
+    use_arc_var = tk.BooleanVar(value=False)
+    converting  = False
 
     try:
         root.iconbitmap("icon.ico")
     except Exception:
         pass
-
-    # ── internal helpers ─────────────────────────────────────────────────────
 
     def log(msg):
         logbox.insert(tk.END, msg + "\n")
@@ -330,10 +359,9 @@ def run_gui():
             input_var.set(path)
             log(f"File selected: {path}")
 
-    # ── conversion (runs in a background thread so the GUI stays responsive) ─
+    # ── background worker ─────────────────────────────────────────────────────
 
-    def _do_convert(in_path, out_path):
-        """Runs in a worker thread."""
+    def _do_convert(in_path, out_path, arc_mode):
         nonlocal converting
 
         def safe_progress(val, txt=""):
@@ -343,20 +371,26 @@ def run_gui():
             root.after(0, log, msg)
 
         try:
-            total_time = convert_file(in_path, out_path, safe_log, safe_progress)
+            total_time = convert_file(
+                in_path, out_path, safe_log, safe_progress,
+                use_arc_commands=arc_mode
+            )
 
             m = int(total_time)
             s = int((total_time - m) * 60)
+            mode_str = "G2/G3 arc commands" if arc_mode else "G1 linearised"
 
             def on_done():
                 log("-" * 50)
-                log("✓ Conversion completed successfully")
+                log(f"✓ Conversion completed  ({mode_str})")
                 log(f"⏱ Estimated program time: {m} min {s} sec")
                 log("⚠ Program time may change according to machine parameters")
                 progress_label.config(text="Conversion complete!")
                 messagebox.showinfo(
                     "Completed",
-                    f"Conversion finished successfully!\n\nEstimated time:\n{m} min {s} sec"
+                    f"Conversion finished successfully!\n"
+                    f"Mode: {mode_str}\n\n"
+                    f"Estimated time:\n{m} min {s} sec"
                 )
 
             root.after(0, on_done)
@@ -394,7 +428,6 @@ def run_gui():
 
         if converting:
             return
-
         if not input_var.get():
             messagebox.showerror("Error", "No input file selected")
             return
@@ -404,7 +437,7 @@ def run_gui():
             messagebox.showerror("Error", f"File not found: {in_path}")
             return
 
-        base = os.path.splitext(os.path.basename(in_path))[0]
+        base     = os.path.splitext(os.path.basename(in_path))[0]
         out_path = filedialog.asksaveasfilename(
             defaultextension=".ngc",
             initialfile=base + ".ngc",
@@ -413,6 +446,7 @@ def run_gui():
         if not out_path:
             return
 
+        arc_mode   = use_arc_var.get()
         converting = True
         convert_btn.config(state="disabled", text="Converting...")
         browse_btn.config(state="disabled")
@@ -423,17 +457,16 @@ def run_gui():
         log("Starting conversion...")
         log(f"Input:  {in_path}")
         log(f"Output: {out_path}")
+        log(f"Mode:   {'G2/G3 arc commands' if arc_mode else 'G1 linearised'}")
         log("-" * 50)
 
-        # run heavy work off the main thread
-        t = threading.Thread(
+        threading.Thread(
             target=_do_convert,
-            args=(in_path, out_path),
+            args=(in_path, out_path, arc_mode),
             daemon=True
-        )
-        t.start()
+        ).start()
 
-    # ── layout ───────────────────────────────────────────────────────────────
+    # ── layout ────────────────────────────────────────────────────────────────
 
     tk.Label(root, text="ISEL File", bg=BG, fg=FG,
              font=("Arial", 10)).pack(pady=5)
@@ -458,6 +491,24 @@ def run_gui():
     )
     convert_btn.pack(side=tk.LEFT, padx=5)
 
+    # ── G2/G3 toggle ─────────────────────────────────────────────────────────
+
+    arc_frame = tk.Frame(root, bg=BG)
+    arc_frame.pack(pady=(0, 8))
+
+    tk.Checkbutton(
+        arc_frame,
+        text="Use G2/G3 arc commands  (smaller file, requires arc-capable controller)",
+        variable=use_arc_var,
+        bg=BG, fg=FG,
+        selectcolor=BTN,
+        activebackground=BG,
+        activeforeground=FG,
+        font=("Arial", 9),
+    ).pack()
+
+    # ── progress ──────────────────────────────────────────────────────────────
+
     progress_frame = tk.Frame(root, bg=BG)
     progress_frame.pack(pady=5, padx=10, fill=tk.X)
 
@@ -479,6 +530,8 @@ def run_gui():
     )
     progress_bar.pack(pady=5)
 
+    # ── log ───────────────────────────────────────────────────────────────────
+
     tk.Label(root, text="Conversion Log", bg=BG, fg=FG,
              font=("Arial", 9)).pack(pady=(5, 2))
 
@@ -498,4 +551,3 @@ def run_gui():
 
 if __name__ == "__main__":
     run_gui()
-
