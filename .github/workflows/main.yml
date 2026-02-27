@@ -26,7 +26,7 @@ jobs:
 
       - name: Build EXE
         run: |
-            pyinstaller --onefile --windowed --name ISEL_to_Gcode --icon=icon.ico --add-data "icon.ico;." --hidden-import=tkinterdnd2 --hidden-import=tkinterdnd2.dnd isel_to_gcode_gui.py
+            pyinstaller --onefile --windowed --name ISEL_to_Gcode --icon=icon.ico --add-data "icon.ico;." --hidden-import=tkinterdnd2 --hidden-import=numpy --hidden-import=tkinterdnd2.dnd isel_to_gcode_gui.py
 
       - name: Upload EXE
         uses: actions/upload-artifact@v4
