@@ -15,7 +15,7 @@ import threading
 SCALE = 1000.0
 VEL_RATIO = 16.6667
 SAFE_Z = 4.0
-ARC_RESOLUTION = 0.03  # mm
+ARC_RESOLUTION = 0.05  # mm
 DEFAULT_FEED = 1000.0   # Default feed rate if no VEL command
 
 BG  = "#1e1e1e"
@@ -498,3 +498,4 @@ def run_gui():
 
 if __name__ == "__main__":
     run_gui()
+
