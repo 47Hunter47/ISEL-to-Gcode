@@ -12,7 +12,6 @@ import os
 import math
 import threading
 
-# numpy is optional – if not installed we fall back to pure-Python arc
 try:
     import numpy as np
     _NUMPY = True
@@ -20,11 +19,11 @@ except ImportError:
     _NUMPY = False
 
 # ── machine constants ─────────────────────────────────────────────────────────
-SCALE          = 1000.0   # ISEL units → mm
-VEL_RATIO      = 16.6667  # ISEL VEL → G-code F (mm/min)
-SAFE_Z         = 4.0      # mm – retract height before first rapid
-ARC_RESOLUTION = 0.05     # mm – chord length for G1 arc linearisation
-DEFAULT_FEED   = 1000.0    # mm/min – fallback if no VEL before first move
+SCALE          = 1000.0
+VEL_RATIO      = 16.6667
+SAFE_Z         = 4.0
+ARC_RESOLUTION = 0.05
+DEFAULT_FEED   = 1000.0
 
 BG  = "#1e1e1e"
 FG  = "#ffffff"
@@ -32,31 +31,17 @@ BTN = "#2d2d2d"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  CORE CONVERSION  –  single-process, fully deterministic
+#  CORE CONVERSION
 # ─────────────────────────────────────────────────────────────────────────────
 
 def convert_file(input_path, output_path, log_fn,
                  progress_callback=None, use_arc_commands=False):
-    """
-    Convert an ISEL NC file to G-code.
-
-    Performance strategy (no multiprocessing → no state-race risk):
-    ─────────────────────────────────────────────────────────────────
-    • If numpy is available, arc linearisation is fully vectorised:
-      all sin/cos values for an arc are computed in a single numpy call
-      instead of a Python for-loop.  This is 10-20× faster for the
-      arc-heavy files that produce millions of G1 lines.
-    • Output is streamed line-by-line (no giant list in RAM).
-    • I/O uses a large write buffer (buffering=256 KB).
-    """
 
     total_time_min = 0.0
     current_feed   = None
     last_pos       = {"X": 0.0, "Y": 0.0, "Z": 0.0}
     line_no        = 1
     start_done     = False
-
-    # ── tiny helpers ──────────────────────────────────────────────────────────
 
     def nline():
         nonlocal line_no
@@ -72,13 +57,31 @@ def convert_file(input_path, output_path, log_fn,
                 coords[axis] = float(m.group(1)) / SCALE
         return coords
 
-    # ── arc as G2/G3 ─────────────────────────────────────────────────────────
+    # ── G2/G3 with R format ───────────────────────────────────────────────────
+    #
+    # WHY R and not I/J:
+    # ──────────────────
+    # ISEL stores arc center as offset from START (I/J) and end point as
+    # absolute coords (X/Y) – both in the same integer unit space.
+    # After /1000 conversion, floating-point rounding makes:
+    #   r_from_start  ≠  r_from_end   (can differ by >1 mm for large arcs)
+    #
+    # With I/J format the controller checks both radii and alarms.
+    # With R format the controller uses the START point + R to draw the arc
+    # and drives to the programmed END point – no radius consistency check.
+    # Logosol CNC explicitly supports: G2 X.. Y.. R.. F..
+    #
+    # R sign convention (standard):
+    #   R > 0  →  arc ≤ 180°  (minor arc)
+    #   R < 0  →  arc > 180°  (major arc)
 
     def arc_to_g2g3(start, end, center, cw):
         nonlocal total_time_min, current_feed
 
         cx, cy = center["X"], center["Y"]
         r  = math.hypot(start["X"] - cx, start["Y"] - cy)
+
+        # arc angle span for time estimate + R sign
         a0 = math.atan2(start["Y"] - cy, start["X"] - cx)
         a1 = math.atan2(end["Y"]   - cy, end["X"]   - cx)
 
@@ -87,30 +90,26 @@ def convert_file(input_path, output_path, log_fn,
         else:
             if a1 <= a0: a1 += 2 * math.pi
 
-        arc_len = abs(a1 - a0) * r
+        span = abs(a1 - a0)           # always positive, 0 < span ≤ 2π
+
+        arc_len = span * r
         if current_feed:
             total_time_min += arc_len / current_feed
 
-        # reproject end onto circle → eliminates "radius mismatch" controller error
-        end_x = cx + r * math.cos(a1)
-        end_y = cy + r * math.sin(a1)
-        i_off = cx - start["X"]
-        j_off = cy - start["Y"]
+        # R sign: negative means major arc (> 180°)
+        r_signed = r if span <= math.pi else -r
 
         code  = "G2" if cw else "G3"
+        # Use ISEL's original end point – no reprojection needed with R format
         gline = (nline() +
-                 f"{code} X{end_x:.4f} Y{end_y:.4f}"
-                 f" I{i_off:.4f} J{j_off:.4f}")
+                 f"{code} X{end['X']:.4f} Y{end['Y']:.4f} R{r_signed:.4f}")
 
-        corrected      = end.copy()
-        corrected["X"] = end_x
-        corrected["Y"] = end_y
-        return corrected, [gline]
+        return end.copy(), [gline]
 
-    # ── arc linearisation  (numpy path) ──────────────────────────────────────
+    # ── arc linearisation – numpy ─────────────────────────────────────────────
 
     def linearize_arc_numpy(start, end, center, cw):
-        nonlocal total_time_min, current_feed
+        nonlocal total_time_min, current_feed, line_no
 
         cx, cy = center["X"], center["Y"]
         z      = start["Z"]
@@ -126,26 +125,21 @@ def convert_file(input_path, output_path, log_fn,
         arc_len = abs(a1 - a0) * r
         steps   = max(1, int(arc_len / ARC_RESOLUTION))
 
-        # ── vectorised trig (the fast part) ──────────────────────────────────
-        angles = np.linspace(a0, a1, steps + 1)[1:]   # shape (steps,)
+        angles = np.linspace(a0, a1, steps + 1)[1:]
         xs     = cx + r * np.cos(angles)
         ys     = cy + r * np.sin(angles)
 
-        # arc-length for time estimate (vectorised)
         dx = np.diff(np.concatenate([[start["X"]], xs]))
         dy = np.diff(np.concatenate([[start["Y"]], ys]))
         if current_feed:
             total_time_min += float(np.sum(np.hypot(dx, dy))) / current_feed
 
-        # build G-code strings
         lines = [
             f"N{line_no + i:05d} G1 X{x:.3f} Y{y:.3f} Z{z:.3f}"
             for i, (x, y) in enumerate(zip(xs, ys))
         ]
-        nonlocal line_no
         line_no += steps
 
-        # exact end-point correction
         pos = {"X": float(xs[-1]), "Y": float(ys[-1]), "Z": z}
         fp  = end.copy()
         if abs(fp["X"] - pos["X"]) > 0.001 or abs(fp["Y"] - pos["Y"]) > 0.001:
@@ -158,7 +152,7 @@ def convert_file(input_path, output_path, log_fn,
 
         return pos, lines
 
-    # ── arc linearisation  (pure-Python fallback) ────────────────────────────
+    # ── arc linearisation – pure Python ──────────────────────────────────────
 
     def linearize_arc_pure(start, end, center, cw):
         nonlocal total_time_min, current_feed, line_no
@@ -203,7 +197,7 @@ def convert_file(input_path, output_path, log_fn,
 
         return pos, lines
 
-    # ── choose handlers once ──────────────────────────────────────────────────
+    # ── choose handler ────────────────────────────────────────────────────────
 
     if use_arc_commands:
         handle_arc = arc_to_g2g3
@@ -212,7 +206,7 @@ def convert_file(input_path, output_path, log_fn,
     else:
         handle_arc = linearize_arc_pure
 
-    # ── first pass: count processable lines ───────────────────────────────────
+    # ── first pass: count lines ───────────────────────────────────────────────
 
     try:
         with open(input_path, "r", encoding="utf-8", errors="replace") as f:
@@ -231,7 +225,7 @@ def convert_file(input_path, output_path, log_fn,
     if progress_callback:
         progress_callback(0, "Reading file…")
 
-    # ── open output with large write buffer ───────────────────────────────────
+    # ── open output ───────────────────────────────────────────────────────────
 
     try:
         out_f = open(output_path, "w", encoding="utf-8", buffering=256 * 1024)
@@ -241,7 +235,7 @@ def convert_file(input_path, output_path, log_fn,
     def emit(line):
         out_f.write(line + "\n")
 
-    # ── main parse + emit loop ────────────────────────────────────────────────
+    # ── main loop ─────────────────────────────────────────────────────────────
 
     try:
         for hdr in ("G21", "G17", "G90"):
@@ -266,7 +260,6 @@ def convert_file(input_path, output_path, log_fn,
                     )
 
                 try:
-                    # ── SPINDLE ───────────────────────────────────────────
                     if line.startswith("SPINDLE CW"):
                         m = re.search(r"RPM(\d+)", line)
                         if m:
@@ -275,7 +268,6 @@ def convert_file(input_path, output_path, log_fn,
                         else:
                             log_fn(f"Warning: Could not parse RPM from: {line}")
 
-                    # ── FASTABS ───────────────────────────────────────────
                     elif line.startswith("FASTABS"):
                         c = parse_coord(line)
                         if not start_done:
@@ -292,7 +284,6 @@ def convert_file(input_path, output_path, log_fn,
                         emit(nline() + cmd)
                         last_pos = target
 
-                    # ── MOVEABS ───────────────────────────────────────────
                     elif line.startswith("MOVEABS"):
                         c      = parse_coord(line)
                         target = last_pos.copy()
@@ -312,7 +303,6 @@ def convert_file(input_path, output_path, log_fn,
                             total_time_min += d / current_feed
                         last_pos = target
 
-                    # ── VEL ───────────────────────────────────────────────
                     elif line.startswith("VEL"):
                         m = re.search(r"VEL\s*(\d+(?:\.\d+)?)", line)
                         if m:
@@ -322,7 +312,6 @@ def convert_file(input_path, output_path, log_fn,
                         else:
                             log_fn(f"Warning: Could not parse VEL from: {line}")
 
-                    # ── CWABS / CCWABS ────────────────────────────────────
                     elif line.startswith("CWABS") or line.startswith("CCWABS"):
                         cw = line.startswith("CWABS")
                         if current_feed is None:
@@ -407,8 +396,6 @@ def run_gui():
             input_var.set(path)
             log(f"File selected: {path}")
 
-    # ── background worker ─────────────────────────────────────────────────────
-
     def _do_convert(in_path, out_path, arc_mode):
         nonlocal converting
 
@@ -487,7 +474,7 @@ def run_gui():
         log(f"Input:   {in_path}")
         log(f"Output:  {out_path}")
         if arc_mode:
-            log("Mode:    G2/G3 arc commands")
+            log("Mode:    G2/G3 arc commands (R format)")
         elif _NUMPY:
             log("Mode:    G1 linearised  (numpy accelerated)")
         else:
@@ -525,14 +512,12 @@ def run_gui():
     )
     convert_btn.pack(side=tk.LEFT, padx=5)
 
-    # numpy status
-    numpy_text = "⚡ numpy detected – arc linearisation accelerated" if _NUMPY \
-                 else "⚠ numpy not found – using pure Python (pip install numpy)"
+    numpy_text  = "⚡ numpy detected – arc linearisation accelerated" if _NUMPY \
+                  else "⚠ numpy not found – pip install numpy"
     numpy_color = "#00ff88" if _NUMPY else "#ffaa00"
     tk.Label(root, text=numpy_text, bg=BG, fg=numpy_color,
              font=("Arial", 8)).pack(pady=(0, 2))
 
-    # G2/G3 toggle
     arc_frame = tk.Frame(root, bg=BG)
     arc_frame.pack(pady=(2, 8))
 
@@ -545,7 +530,6 @@ def run_gui():
         font=("Arial", 9),
     ).pack()
 
-    # Progress
     progress_frame = tk.Frame(root, bg=BG)
     progress_frame.pack(pady=5, padx=10, fill=tk.X)
 
@@ -580,8 +564,6 @@ def run_gui():
 
     root.mainloop()
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     run_gui()
