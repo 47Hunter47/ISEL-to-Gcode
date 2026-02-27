@@ -1,7 +1,7 @@
 try:
     from version import APP_VERSION
 except ImportError:
-    APP_VERSION = "1.6"
+    APP_VERSION = "1.7"
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -14,8 +14,7 @@ import threading
 
 # ── machine constants ─────────────────────────────────────────────────────────
 SCALE          = 1000.0   # ISEL units → mm  (1 unit = 0.001 mm)
-VEL_RATIO      = 16.6667  # ISEL VEL (mm/min ?) → G-code F (mm/min)
-                           # Adjust this if estimated times are off on your machine
+VEL_RATIO      = 16.6667  # ISEL VEL → G-code F (mm/min)
 SAFE_Z         = 4.0      # mm – retract height before first rapid
 ARC_RESOLUTION = 0.05     # mm – chord length when linearising arcs (G1 mode)
 DEFAULT_FEED   = 1000.0    # mm/min – fallback if no VEL found before first move
@@ -68,7 +67,6 @@ def convert_file(input_path, output_path, log, progress_callback=None,
         """
         coords = {}
         for axis in axes:
-            # FIX: added (?:\.\d+)? so decimals are captured correctly
             m = re.search(rf"{axis}(-?\d+(?:\.\d+)?)", text)
             if m:
                 coords[axis] = float(m.group(1)) / SCALE
@@ -79,20 +77,34 @@ def convert_file(input_path, output_path, log, progress_callback=None,
     def arc_to_g2g3(start, end, center, cw):
         """
         Emit one G2/G3 line using I/J centre offsets.
-        Z is intentionally omitted from the arc line: most controllers
-        (Fanuc, Mach3, LinuxCNC, GRBL) do not support helical Z in the
-        same block as a planar arc, and ISEL arcs are always XY-planar.
-        Returns (new_pos, [gcode_line]).
+
+        FIX: "radius to end of arc differs from radius to start"
+        ─────────────────────────────────────────────────────────
+        The error occurs because floating-point division (ISEL integer / 1000.0)
+        leaves a tiny difference between:
+            r_start = hypot(start - center)
+            r_end   = hypot(end   - center)
+
+        Most controllers check this and alarm if the difference exceeds their
+        internal tolerance (often 0.001–0.005 mm).
+
+        Solution: recompute the end point by projecting it back onto the circle
+        defined by the start radius.  This guarantees r_start == r_end to full
+        floating-point precision, so the controller's check always passes.
+
+        Z is intentionally omitted from the G2/G3 line (ISEL arcs are always
+        XY-planar; mixing Z in the same block confuses many controllers).
         """
         nonlocal total_time_min, current_feed
 
-        i_off = center["X"] - start["X"]
-        j_off = center["Y"] - start["Y"]
+        cx, cy = center["X"], center["Y"]
 
-        # arc length for time estimation
-        r  = math.hypot(i_off, j_off)
-        a0 = math.atan2(start["Y"] - center["Y"], start["X"] - center["X"])
-        a1 = math.atan2(end["Y"]   - center["Y"], end["X"]   - center["X"])
+        # radius from start point (authoritative)
+        r = math.hypot(start["X"] - cx, start["Y"] - cy)
+
+        # --- arc angle span ---
+        a0 = math.atan2(start["Y"] - cy, start["X"] - cx)
+        a1 = math.atan2(end["Y"]   - cy, end["X"]   - cx)
 
         if cw:
             if a1 >= a0:
@@ -105,14 +117,26 @@ def convert_file(input_path, output_path, log, progress_callback=None,
         if current_feed:
             total_time_min += arc_len / current_feed
 
+        # --- corrected end point (lies exactly on the circle) ---
+        end_x = cx + r * math.cos(a1)
+        end_y = cy + r * math.sin(a1)
+
+        # I/J are offsets from START to centre
+        i_off = cx - start["X"]
+        j_off = cy - start["Y"]
+
         code  = "G2" if cw else "G3"
-        # FIX: Z removed from G2/G3 line for maximum controller compatibility
         gline = (
             nline() +
-            f"{code} X{end['X']:.3f} Y{end['Y']:.3f}"
-            f" I{i_off:.3f} J{j_off:.3f}"
+            f"{code} X{end_x:.4f} Y{end_y:.4f}"
+            f" I{i_off:.4f} J{j_off:.4f}"
         )
-        return end.copy(), [gline]
+        # update end with corrected coordinates
+        corrected_end = end.copy()
+        corrected_end["X"] = end_x
+        corrected_end["Y"] = end_y
+
+        return corrected_end, [gline]
 
     # ── arc as linearised G1 segments ─────────────────────────────────────────
 
@@ -187,7 +211,6 @@ def convert_file(input_path, output_path, log, progress_callback=None,
     except Exception as e:
         raise Exception(f"Error reading input file: {e}")
 
-    # FIX: guard against empty / comment-only files → avoid ZeroDivisionError
     if total_lines == 0:
         raise Exception("Input file contains no processable commands.")
 
@@ -205,7 +228,6 @@ def convert_file(input_path, output_path, log, progress_callback=None,
         out_f.write(line + "\n")
 
     try:
-        # G-code header
         for hdr in ("G21", "G17", "G90"):
             emit(hdr)
 
@@ -222,7 +244,6 @@ def convert_file(input_path, output_path, log, progress_callback=None,
                 if progress_callback and (
                     lines_processed % 50 == 0 or lines_processed == total_lines
                 ):
-                    # scale to 0-95 so the jump to 100 at the end is small
                     pct = (lines_processed / total_lines) * 95
                     progress_callback(
                         pct, f"Processing line {lines_processed}/{total_lines}"
@@ -252,8 +273,6 @@ def convert_file(input_path, output_path, log, progress_callback=None,
                         target = last_pos.copy()
                         target.update(c)
 
-                        # FIX: only include axes that actually appear in the
-                        # command so a Z-only FASTABS doesn't re-emit stale XY.
                         cmd = "G0"
                         for k in ("X", "Y", "Z"):
                             if k in c:
@@ -272,7 +291,6 @@ def convert_file(input_path, output_path, log, progress_callback=None,
                             emit(nline() + f"F{current_feed:.0f}")
                             log(f"Warning: No VEL command found, using default F{current_feed:.0f}")
 
-                        # Same axis-filtering logic as FASTABS
                         cmd = "G1"
                         for k in ("X", "Y", "Z"):
                             if k in c:
@@ -324,7 +342,6 @@ def convert_file(input_path, output_path, log, progress_callback=None,
                     log(f"  Error: {e}")
                     continue
 
-        # G-code footer
         emit(nline() + "M05")
         emit(nline() + "M30")
 
@@ -356,8 +373,6 @@ def run_gui():
     except Exception:
         pass
 
-    # ── log / progress helpers ────────────────────────────────────────────────
-
     def log(msg):
         logbox.insert(tk.END, msg + "\n")
         logbox.see(tk.END)
@@ -367,8 +382,6 @@ def run_gui():
         if status_text:
             progress_label.config(text=status_text)
         root.update_idletasks()
-
-    # ── drag-and-drop / browse ────────────────────────────────────────────────
 
     def drop(event):
         if converting:
@@ -387,8 +400,6 @@ def run_gui():
         if path:
             input_var.set(path)
             log(f"File selected: {path}")
-
-    # ── background worker ─────────────────────────────────────────────────────
 
     def _do_convert(in_path, out_path, arc_mode):
         nonlocal converting
@@ -451,8 +462,6 @@ def run_gui():
                 convert_btn.config(state="normal", text="Convert")
                 browse_btn.config(state="normal")
             root.after(0, re_enable)
-
-    # ── convert button handler ────────────────────────────────────────────────
 
     def convert():
         nonlocal converting
@@ -559,7 +568,6 @@ def run_gui():
     )
     progress_bar.pack(pady=5)
 
-    # Log
     tk.Label(root, text="Conversion Log", bg=BG, fg=FG,
              font=("Arial", 9)).pack(pady=(5, 2))
 
