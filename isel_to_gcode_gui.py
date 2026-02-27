@@ -1,7 +1,7 @@
 try:
     from version import APP_VERSION
 except ImportError:
-    APP_VERSION = "1.5"
+    APP_VERSION = "1.6"
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -12,11 +12,13 @@ import os
 import math
 import threading
 
-SCALE          = 1000.0
-VEL_RATIO      = 16.6667
-SAFE_Z         = 4.0
-ARC_RESOLUTION = 0.05   # mm  (used only when linearising)
-DEFAULT_FEED   = 1000.0
+# ── machine constants ─────────────────────────────────────────────────────────
+SCALE          = 1000.0   # ISEL units → mm  (1 unit = 0.001 mm)
+VEL_RATIO      = 16.6667  # ISEL VEL (mm/min ?) → G-code F (mm/min)
+                           # Adjust this if estimated times are off on your machine
+SAFE_Z         = 4.0      # mm – retract height before first rapid
+ARC_RESOLUTION = 0.05     # mm – chord length when linearising arcs (G1 mode)
+DEFAULT_FEED   = 1000.0    # mm/min – fallback if no VEL found before first move
 
 BG  = "#1e1e1e"
 FG  = "#ffffff"
@@ -32,8 +34,9 @@ def convert_file(input_path, output_path, log, progress_callback=None,
     """
     Convert an ISEL NC file to G-code.
 
-    use_arc_commands=False  → arcs linearised to G1 segments (original behaviour)
-    use_arc_commands=True   → arcs emitted as G2/G3  (much smaller output file)
+    use_arc_commands=False  → arcs linearised to G1 segments (safe / universal)
+    use_arc_commands=True   → arcs emitted as G2/G3 (smaller file,
+                               requires arc-capable controller)
     """
 
     total_time_min = 0.0
@@ -58,9 +61,15 @@ def convert_file(input_path, output_path, log, progress_callback=None,
         )
 
     def parse_coord(text, axes=("X", "Y", "Z")):
+        """
+        Extract axis values from an ISEL command string.
+        Handles integers AND decimals, e.g. X-3250, X12.5, X-3.25
+        Divides by SCALE to convert ISEL units → mm.
+        """
         coords = {}
         for axis in axes:
-            m = re.search(rf"{axis}(-?\d+)", text)
+            # FIX: added (?:\.\d+)? so decimals are captured correctly
+            m = re.search(rf"{axis}(-?\d+(?:\.\d+)?)", text)
             if m:
                 coords[axis] = float(m.group(1)) / SCALE
         return coords
@@ -70,6 +79,9 @@ def convert_file(input_path, output_path, log, progress_callback=None,
     def arc_to_g2g3(start, end, center, cw):
         """
         Emit one G2/G3 line using I/J centre offsets.
+        Z is intentionally omitted from the arc line: most controllers
+        (Fanuc, Mach3, LinuxCNC, GRBL) do not support helical Z in the
+        same block as a planar arc, and ISEL arcs are always XY-planar.
         Returns (new_pos, [gcode_line]).
         """
         nonlocal total_time_min, current_feed
@@ -77,7 +89,7 @@ def convert_file(input_path, output_path, log, progress_callback=None,
         i_off = center["X"] - start["X"]
         j_off = center["Y"] - start["Y"]
 
-        # arc length for time estimate
+        # arc length for time estimation
         r  = math.hypot(i_off, j_off)
         a0 = math.atan2(start["Y"] - center["Y"], start["X"] - center["X"])
         a1 = math.atan2(end["Y"]   - center["Y"], end["X"]   - center["X"])
@@ -93,10 +105,11 @@ def convert_file(input_path, output_path, log, progress_callback=None,
         if current_feed:
             total_time_min += arc_len / current_feed
 
-        code = "G2" if cw else "G3"
+        code  = "G2" if cw else "G3"
+        # FIX: Z removed from G2/G3 line for maximum controller compatibility
         gline = (
             nline() +
-            f"{code} X{end['X']:.3f} Y{end['Y']:.3f} Z{end['Z']:.3f}"
+            f"{code} X{end['X']:.3f} Y{end['Y']:.3f}"
             f" I{i_off:.3f} J{j_off:.3f}"
         )
         return end.copy(), [gline]
@@ -161,7 +174,7 @@ def convert_file(input_path, output_path, log, progress_callback=None,
 
     handle_arc = arc_to_g2g3 if use_arc_commands else linearize_arc
 
-    # ── first pass: count lines for progress bar ──────────────────────────────
+    # ── first pass: count non-comment lines for progress bar ─────────────────
 
     try:
         with open(input_path, "r", encoding="utf-8", errors="replace") as f:
@@ -174,10 +187,14 @@ def convert_file(input_path, output_path, log, progress_callback=None,
     except Exception as e:
         raise Exception(f"Error reading input file: {e}")
 
+    # FIX: guard against empty / comment-only files → avoid ZeroDivisionError
+    if total_lines == 0:
+        raise Exception("Input file contains no processable commands.")
+
     if progress_callback:
         progress_callback(0, "Reading file...")
 
-    # ── open output & stream-write ────────────────────────────────────────────
+    # ── open output for streaming write ──────────────────────────────────────
 
     try:
         out_f = open(output_path, "w", encoding="utf-8")
@@ -188,6 +205,7 @@ def convert_file(input_path, output_path, log, progress_callback=None,
         out_f.write(line + "\n")
 
     try:
+        # G-code header
         for hdr in ("G21", "G17", "G90"):
             emit(hdr)
 
@@ -204,7 +222,8 @@ def convert_file(input_path, output_path, log, progress_callback=None,
                 if progress_callback and (
                     lines_processed % 50 == 0 or lines_processed == total_lines
                 ):
-                    pct = (lines_processed / total_lines) * 90
+                    # scale to 0-95 so the jump to 100 at the end is small
+                    pct = (lines_processed / total_lines) * 95
                     progress_callback(
                         pct, f"Processing line {lines_processed}/{total_lines}"
                     )
@@ -220,7 +239,7 @@ def convert_file(input_path, output_path, log, progress_callback=None,
                         else:
                             log(f"Warning: Could not parse RPM from: {line}")
 
-                    # ── FASTABS ───────────────────────────────────────────
+                    # ── FASTABS (rapid move) ──────────────────────────────
                     elif line.startswith("FASTABS"):
                         c = parse_coord(line)
 
@@ -233,13 +252,16 @@ def convert_file(input_path, output_path, log, progress_callback=None,
                         target = last_pos.copy()
                         target.update(c)
 
+                        # FIX: only include axes that actually appear in the
+                        # command so a Z-only FASTABS doesn't re-emit stale XY.
                         cmd = "G0"
                         for k in ("X", "Y", "Z"):
-                            cmd += f" {k}{target[k]:.3f}"
+                            if k in c:
+                                cmd += f" {k}{target[k]:.3f}"
                         emit(nline() + cmd)
                         last_pos = target
 
-                    # ── MOVEABS ───────────────────────────────────────────
+                    # ── MOVEABS (feed move) ───────────────────────────────
                     elif line.startswith("MOVEABS"):
                         c      = parse_coord(line)
                         target = last_pos.copy()
@@ -250,27 +272,29 @@ def convert_file(input_path, output_path, log, progress_callback=None,
                             emit(nline() + f"F{current_feed:.0f}")
                             log(f"Warning: No VEL command found, using default F{current_feed:.0f}")
 
+                        # Same axis-filtering logic as FASTABS
                         cmd = "G1"
                         for k in ("X", "Y", "Z"):
-                            cmd += f" {k}{target[k]:.3f}"
+                            if k in c:
+                                cmd += f" {k}{target[k]:.3f}"
                         emit(nline() + cmd)
 
                         if current_feed:
                             total_time_min += move_distance(last_pos, target) / current_feed
                         last_pos = target
 
-                    # ── VEL ───────────────────────────────────────────────
+                    # ── VEL (feed rate) ───────────────────────────────────
                     elif line.startswith("VEL"):
-                        m = re.search(r"VEL\s*(\d+)", line)
+                        m = re.search(r"VEL\s*(\d+(?:\.\d+)?)", line)
                         if m:
-                            vel          = int(m.group(1))
+                            vel          = float(m.group(1))
                             current_feed = vel / VEL_RATIO
                             emit(nline() + f"F{current_feed:.0f}")
                             log(f"Feed: F{current_feed:.0f}")
                         else:
                             log(f"Warning: Could not parse VEL from: {line}")
 
-                    # ── CWABS / CCWABS ────────────────────────────────────
+                    # ── CWABS / CCWABS (arc move) ─────────────────────────
                     elif line.startswith("CWABS") or line.startswith("CCWABS"):
                         cw = line.startswith("CWABS")
 
@@ -300,6 +324,7 @@ def convert_file(input_path, output_path, log, progress_callback=None,
                     log(f"  Error: {e}")
                     continue
 
+        # G-code footer
         emit(nline() + "M05")
         emit(nline() + "M30")
 
@@ -331,6 +356,8 @@ def run_gui():
     except Exception:
         pass
 
+    # ── log / progress helpers ────────────────────────────────────────────────
+
     def log(msg):
         logbox.insert(tk.END, msg + "\n")
         logbox.see(tk.END)
@@ -340,6 +367,8 @@ def run_gui():
         if status_text:
             progress_label.config(text=status_text)
         root.update_idletasks()
+
+    # ── drag-and-drop / browse ────────────────────────────────────────────────
 
     def drop(event):
         if converting:
@@ -376,8 +405,8 @@ def run_gui():
                 use_arc_commands=arc_mode
             )
 
-            m = int(total_time)
-            s = int((total_time - m) * 60)
+            m        = int(total_time)
+            s        = int((total_time - m) * 60)
             mode_str = "G2/G3 arc commands" if arc_mode else "G1 linearised"
 
             def on_done():
@@ -422,6 +451,8 @@ def run_gui():
                 convert_btn.config(state="normal", text="Convert")
                 browse_btn.config(state="normal")
             root.after(0, re_enable)
+
+    # ── convert button handler ────────────────────────────────────────────────
 
     def convert():
         nonlocal converting
@@ -491,8 +522,7 @@ def run_gui():
     )
     convert_btn.pack(side=tk.LEFT, padx=5)
 
-    # ── G2/G3 toggle ─────────────────────────────────────────────────────────
-
+    # G2/G3 toggle
     arc_frame = tk.Frame(root, bg=BG)
     arc_frame.pack(pady=(0, 8))
 
@@ -507,8 +537,7 @@ def run_gui():
         font=("Arial", 9),
     ).pack()
 
-    # ── progress ──────────────────────────────────────────────────────────────
-
+    # Progress
     progress_frame = tk.Frame(root, bg=BG)
     progress_frame.pack(pady=5, padx=10, fill=tk.X)
 
@@ -530,8 +559,7 @@ def run_gui():
     )
     progress_bar.pack(pady=5)
 
-    # ── log ───────────────────────────────────────────────────────────────────
-
+    # Log
     tk.Label(root, text="Conversion Log", bg=BG, fg=FG,
              font=("Arial", 9)).pack(pady=(5, 2))
 
