@@ -1,7 +1,7 @@
 try:
     from version import APP_VERSION
 except ImportError:
-    APP_VERSION = "1.7"
+    APP_VERSION = "1.8"
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -24,6 +24,7 @@ VEL_RATIO      = 16.6667
 SAFE_Z         = 4.0
 ARC_RESOLUTION = 0.05
 DEFAULT_FEED   = 1000.0
+RAPID_FEED     = 3000.0   # assumed G0 rapid speed in mm/min for time estimate
 
 BG  = "#1e1e1e"
 FG  = "#ffffff"
@@ -41,7 +42,6 @@ def convert_file(input_path, output_path, log_fn,
     current_feed   = None
     last_pos       = {"X": 0.0, "Y": 0.0, "Z": 0.0}
     line_no        = 1
-    start_done     = False
 
     def nline():
         nonlocal line_no
@@ -238,8 +238,10 @@ def convert_file(input_path, output_path, log_fn,
     # ── main loop ─────────────────────────────────────────────────────────────
 
     try:
-        for hdr in ("G21", "G17", "G90"):
-            emit(hdr)
+        # header lines now numbered for controller consistency
+        emit(nline() + "G21")
+        emit(nline() + "G17")
+        emit(nline() + "G90")
 
         with open(input_path, "r", encoding="utf-8", errors="replace") as in_f:
             lines_processed = 0
@@ -269,12 +271,10 @@ def convert_file(input_path, output_path, log_fn,
                             log_fn(f"Warning: Could not parse RPM from: {line}")
 
                     elif line.startswith("FASTABS"):
-                        c = parse_coord(line)
-                        if not start_done:
-                            if last_pos["Z"] < SAFE_Z:
-                                emit(nline() + f"G0 Z{SAFE_Z:.3f}")
-                                last_pos["Z"] = SAFE_Z
-                            start_done = True
+                        # NO automatic safe-Z prepend anymore – the source file
+                        # already contains its own Z lift commands. Adding
+                        # ours produced duplicate G0 Z lines.
+                        c      = parse_coord(line)
                         target = last_pos.copy()
                         target.update(c)
                         cmd = "G0"
@@ -282,6 +282,13 @@ def convert_file(input_path, output_path, log_fn,
                             if k in c:
                                 cmd += f" {k}{target[k]:.3f}"
                         emit(nline() + cmd)
+
+                        # rapid moves also take time – include them in estimate
+                        d = math.sqrt(sum((target[k] - last_pos[k]) ** 2
+                                         for k in "XYZ"))
+                        if d > 0:
+                            total_time_min += d / RAPID_FEED
+
                         last_pos = target
 
                     elif line.startswith("MOVEABS"):
@@ -327,6 +334,13 @@ def convert_file(input_path, output_path, log_fn,
                             "X": last_pos["X"] + ij.get("I", 0.0),
                             "Y": last_pos["Y"] + ij.get("J", 0.0),
                         }
+
+                        # guard: zero-radius arc would crash atan2 logic
+                        r_check = math.hypot(last_pos["X"] - center["X"],
+                                             last_pos["Y"] - center["Y"])
+                        if r_check < 1e-6:
+                            log_fn(f"Warning: zero-radius arc skipped on line [{line}]")
+                            continue
 
                         new_pos, arc_lines = handle_arc(last_pos, end, center, cw)
                         for al in arc_lines:
