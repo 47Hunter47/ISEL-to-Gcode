@@ -1,7 +1,7 @@
 try:
     from version import APP_VERSION
 except ImportError:
-    APP_VERSION = "1.8"
+    APP_VERSION = "1.9"
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -238,10 +238,25 @@ def convert_file(input_path, output_path, log_fn,
     # ── main loop ─────────────────────────────────────────────────────────────
 
     try:
-        # header lines now numbered for controller consistency
+        # ── Logosol-safe header ───────────────────────────────────────────────
+        # Per Logosol Operator's Manual (Doc # 710231002):
+        #   G21 – millimeter mode  (Appendix C)
+        #   G17 – XY plane select; required before any G2/G3 (p.17)
+        #   G40 – cancel cutter radius compensation; otherwise coord-system
+        #         changes are blocked (p.20) and a leftover G41/G42 from a
+        #         previous program would offset every move
+        #   G49 – cancel tool length offset; without this any active tool
+        #         length compensation shifts every Z value (p.19)
+        #   G90 – absolute distance mode (p.22). Critical: a leftover G91
+        #         from a previous program would treat all coords as relative
+        #   G94 – units-per-minute feed mode (p.23). G93 (inverse time) from
+        #         a previous program would mis-interpret every F value
         emit(nline() + "G21")
         emit(nline() + "G17")
+        emit(nline() + "G40")
+        emit(nline() + "G49")
         emit(nline() + "G90")
+        emit(nline() + "G94")
 
         with open(input_path, "r", encoding="utf-8", errors="replace") as in_f:
             lines_processed = 0
