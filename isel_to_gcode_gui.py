@@ -1,7 +1,7 @@
 try:
     from version import APP_VERSION
 except ImportError:
-    APP_VERSION = "1.9"
+    APP_VERSION = "1.91"
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -50,6 +50,11 @@ def convert_file(input_path, output_path, log_fn,
         return s
 
     def parse_coord(text, axes=("X", "Y", "Z")):
+        """
+        Parse axis values from an ISEL command string.
+        All values are divided by SCALE (1000) to convert from microns to mm.
+        I/J in ISEL are ABSOLUTE coordinates (not offsets from current pos).
+        """
         coords = {}
         for axis in axes:
             m = re.search(rf"{axis}(-?\d+(?:\.\d+)?)", text)
@@ -61,7 +66,7 @@ def convert_file(input_path, output_path, log_fn,
     #
     # WHY R and not I/J:
     # ──────────────────
-    # ISEL stores arc center as offset from START (I/J) and end point as
+    # ISEL stores arc center as absolute coordinates (I/J) and end point as
     # absolute coords (X/Y) – both in the same integer unit space.
     # After /1000 conversion, floating-point rounding makes:
     #   r_from_start  ≠  r_from_end   (can differ by >1 mm for large arcs)
@@ -100,7 +105,6 @@ def convert_file(input_path, output_path, log_fn,
         r_signed = r if span <= math.pi else -r
 
         code  = "G2" if cw else "G3"
-        # Use ISEL's original end point – no reprojection needed with R format
         gline = (nline() +
                  f"{code} X{end['X']:.4f} Y{end['Y']:.4f} R{r_signed:.4f}")
 
@@ -239,18 +243,6 @@ def convert_file(input_path, output_path, log_fn,
 
     try:
         # ── Logosol-safe header ───────────────────────────────────────────────
-        # Per Logosol Operator's Manual (Doc # 710231002):
-        #   G21 – millimeter mode  (Appendix C)
-        #   G17 – XY plane select; required before any G2/G3 (p.17)
-        #   G40 – cancel cutter radius compensation; otherwise coord-system
-        #         changes are blocked (p.20) and a leftover G41/G42 from a
-        #         previous program would offset every move
-        #   G49 – cancel tool length offset; without this any active tool
-        #         length compensation shifts every Z value (p.19)
-        #   G90 – absolute distance mode (p.22). Critical: a leftover G91
-        #         from a previous program would treat all coords as relative
-        #   G94 – units-per-minute feed mode (p.23). G93 (inverse time) from
-        #         a previous program would mis-interpret every F value
         emit(nline() + "G21")
         emit(nline() + "G17")
         emit(nline() + "G40")
@@ -286,9 +278,6 @@ def convert_file(input_path, output_path, log_fn,
                             log_fn(f"Warning: Could not parse RPM from: {line}")
 
                     elif line.startswith("FASTABS"):
-                        # NO automatic safe-Z prepend anymore – the source file
-                        # already contains its own Z lift commands. Adding
-                        # ours produced duplicate G0 Z lines.
                         c      = parse_coord(line)
                         target = last_pos.copy()
                         target.update(c)
@@ -298,7 +287,6 @@ def convert_file(input_path, output_path, log_fn,
                                 cmd += f" {k}{target[k]:.3f}"
                         emit(nline() + cmd)
 
-                        # rapid moves also take time – include them in estimate
                         d = math.sqrt(sum((target[k] - last_pos[k]) ** 2
                                          for k in "XYZ"))
                         if d > 0:
@@ -343,11 +331,18 @@ def convert_file(input_path, output_path, log_fn,
 
                         c  = parse_coord(line, axes=("X", "Y", "Z"))
                         ij = parse_coord(line, axes=("I", "J"))
-                        end    = last_pos.copy()
+
+                        end = last_pos.copy()
                         end.update(c)
+
+                        # FIX v1.92: ISEL I/J are ABSOLUTE coordinates, not
+                        # offsets from the current position. Previous code did
+                        # last_pos + I/J which inflated the radius by ~10x and
+                        # turned every small arc into a near-full-circle,
+                        # causing ~7000 segments per arc and 8+ GB output files.
                         center = {
-                            "X": last_pos["X"] + ij.get("I", 0.0),
-                            "Y": last_pos["Y"] + ij.get("J", 0.0),
+                            "X": ij.get("I", 0.0),
+                            "Y": ij.get("J", 0.0),
                         }
 
                         # guard: zero-radius arc would crash atan2 logic
