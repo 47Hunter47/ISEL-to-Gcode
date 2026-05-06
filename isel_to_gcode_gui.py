@@ -1,7 +1,7 @@
 try:
     from version import APP_VERSION
 except ImportError:
-    APP_VERSION = "1.91"
+    APP_VERSION = "1.93"
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -24,11 +24,277 @@ VEL_RATIO      = 16.6667
 SAFE_Z         = 4.0
 ARC_RESOLUTION = 0.05
 DEFAULT_FEED   = 1000.0
-RAPID_FEED     = 3000.0   # assumed G0 rapid speed in mm/min for time estimate
+RAPID_FEED     = 3000.0
 
+# ── UI colors ─────────────────────────────────────────────────────────────────
 BG  = "#1e1e1e"
 FG  = "#ffffff"
 BTN = "#2d2d2d"
+
+# ── preview colors ────────────────────────────────────────────────────────────
+COLOR_CUT   = "#00c8ff"   # G1 cutting moves  — cyan
+COLOR_RAPID = "#ff4444"   # G0 rapid moves    — red
+COLOR_BG    = "#121212"   # canvas background
+COLOR_GRID  = "#2a2a2a"   # grid lines
+COLOR_AXIS  = "#3a3a3a"   # axis lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  PREVIEW WINDOW
+# ─────────────────────────────────────────────────────────────────────────────
+
+def open_preview(parent, gcode_path):
+    """
+    Parse the output G-code file and draw all moves on a canvas.
+    G0  → rapid (red, thin dashed)
+    G1/G2/G3 → cutting (cyan, solid)
+    Pan with left-click drag, zoom with mouse wheel.
+    """
+
+    # ── parse G-code into move segments ──────────────────────────────────────
+    segments = []   # list of (x0,y0, x1,y1, is_rapid)
+
+    cx_pos, cy_pos = 0.0, 0.0
+    is_rapid = False
+
+    try:
+        with open(gcode_path, "r", encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                line = raw.strip()
+                # strip line number
+                line = re.sub(r"^N\d+\s*", "", line)
+
+                if not line:
+                    continue
+
+                # detect move type
+                if line.startswith("G0"):
+                    is_rapid = True
+                elif re.match(r"G[123]\b", line):
+                    is_rapid = False
+                else:
+                    # non-move command — skip but don't reset position
+                    continue
+
+                # extract X / Y (ignore Z for 2D preview)
+                xm = re.search(r"X(-?\d+(?:\.\d+)?)", line)
+                ym = re.search(r"Y(-?\d+(?:\.\d+)?)", line)
+
+                nx = float(xm.group(1)) if xm else cx_pos
+                ny = float(ym.group(1)) if ym else cy_pos
+
+                segments.append((cx_pos, cy_pos, nx, ny, is_rapid))
+                cx_pos, cy_pos = nx, ny
+
+    except Exception as e:
+        messagebox.showerror("Preview Error", f"Could not read G-code:\n{e}",
+                             parent=parent)
+        return
+
+    if not segments:
+        messagebox.showinfo("Preview", "No moves found in G-code file.",
+                            parent=parent)
+        return
+
+    # ── compute bounding box ──────────────────────────────────────────────────
+    all_x = [s[0] for s in segments] + [s[2] for s in segments]
+    all_y = [s[1] for s in segments] + [s[3] for s in segments]
+    min_x, max_x = min(all_x), max(all_x)
+    min_y, max_y = min(all_y), max(all_y)
+    span_x = max_x - min_x or 1.0
+    span_y = max_y - min_y or 1.0
+
+    # ── window setup ──────────────────────────────────────────────────────────
+    win = tk.Toplevel(parent)
+    win.title(f"Path Preview — {os.path.basename(gcode_path)}")
+    win.geometry("900x700")
+    win.configure(bg=BG)
+    win.resizable(True, True)
+
+    # ── toolbar ───────────────────────────────────────────────────────────────
+    toolbar = tk.Frame(win, bg=BTN, pady=4)
+    toolbar.pack(fill=tk.X)
+
+    tk.Label(toolbar, text="Path Preview", bg=BTN, fg=FG,
+             font=("Consolas", 10, "bold")).pack(side=tk.LEFT, padx=10)
+
+    # legend
+    tk.Label(toolbar, text="━━", bg=BTN, fg=COLOR_CUT,
+             font=("Consolas", 11)).pack(side=tk.LEFT, padx=(20, 2))
+    tk.Label(toolbar, text="Cutting (G1)", bg=BTN, fg=FG,
+             font=("Consolas", 9)).pack(side=tk.LEFT)
+
+    tk.Label(toolbar, text="━━", bg=BTN, fg=COLOR_RAPID,
+             font=("Consolas", 11)).pack(side=tk.LEFT, padx=(16, 2))
+    tk.Label(toolbar, text="Rapid (G0)", bg=BTN, fg=FG,
+             font=("Consolas", 9)).pack(side=tk.LEFT)
+
+    # stats
+    cut_count   = sum(1 for s in segments if not s[4])
+    rapid_count = sum(1 for s in segments if s[4])
+    stats_text  = (f"  |  Moves: {cut_count:,} cut   {rapid_count:,} rapid"
+                   f"  |  W:{span_x:.1f}mm  H:{span_y:.1f}mm")
+    tk.Label(toolbar, text=stats_text, bg=BTN, fg="#888888",
+             font=("Consolas", 9)).pack(side=tk.LEFT, padx=10)
+
+    tk.Button(toolbar, text="Fit", bg="#3a7afe", fg="white",
+              font=("Consolas", 9), relief="flat", padx=8,
+              command=lambda: fit_view()).pack(side=tk.RIGHT, padx=8)
+
+    # ── canvas ────────────────────────────────────────────────────────────────
+    canvas = tk.Canvas(win, bg=COLOR_BG, highlightthickness=0)
+    canvas.pack(fill=tk.BOTH, expand=True)
+
+    # ── view state ────────────────────────────────────────────────────────────
+    view = {"ox": 0.0, "oy": 0.0, "scale": 1.0}
+    drag = {"x": 0, "y": 0, "active": False}
+
+    PADDING = 40   # px padding around content when fitting
+
+    def world_to_canvas(wx, wy):
+        """Convert mm world coords to canvas pixel coords."""
+        s  = view["scale"]
+        px = view["ox"] + wx * s
+        # Y axis: G-code Y+ is "up", canvas Y+ is down — flip
+        py = view["oy"] - wy * s
+        return px, py
+
+    def draw_all():
+        canvas.delete("all")
+        cw = canvas.winfo_width()
+        ch = canvas.winfo_height()
+        if cw < 2 or ch < 2:
+            return
+
+        # grid (light)
+        s = view["scale"]
+        # choose grid spacing so cells are ~50-100 px
+        raw_step = 50.0 / s
+        # round to nice number
+        magnitude = 10 ** math.floor(math.log10(raw_step)) if raw_step > 0 else 1
+        for mult in (1, 2, 5, 10):
+            if magnitude * mult >= raw_step:
+                grid_step = magnitude * mult
+                break
+        else:
+            grid_step = magnitude * 10
+
+        # vertical grid lines
+        x_start = math.floor(min_x / grid_step) * grid_step - grid_step
+        x_end   = max_x + grid_step
+        gx = x_start
+        while gx <= x_end:
+            px, _ = world_to_canvas(gx, 0)
+            if 0 <= px <= cw:
+                canvas.create_line(px, 0, px, ch, fill=COLOR_GRID, width=1)
+                canvas.create_text(px + 2, ch - 12, text=f"{gx:.0f}",
+                                   fill="#555555", font=("Consolas", 7),
+                                   anchor="w")
+            gx += grid_step
+
+        # horizontal grid lines
+        y_start = math.floor(min_y / grid_step) * grid_step - grid_step
+        y_end   = max_y + grid_step
+        gy = y_start
+        while gy <= y_end:
+            _, py = world_to_canvas(0, gy)
+            if 0 <= py <= ch:
+                canvas.create_line(0, py, cw, py, fill=COLOR_GRID, width=1)
+                canvas.create_text(4, py - 2, text=f"{gy:.0f}",
+                                   fill="#555555", font=("Consolas", 7),
+                                   anchor="sw")
+            gy += grid_step
+
+        # origin cross
+        ox_px, oy_px = world_to_canvas(0, 0)
+        canvas.create_line(ox_px, 0, ox_px, ch, fill=COLOR_AXIS, width=1)
+        canvas.create_line(0, oy_px, cw, oy_px, fill=COLOR_AXIS, width=1)
+
+        # draw moves — rapid first (underneath), then cuts on top
+        for pass_rapid in (True, False):
+            color = COLOR_RAPID if pass_rapid else COLOR_CUT
+            width = 1 if pass_rapid else 1
+            dash  = (4, 4) if pass_rapid else None
+
+            for x0, y0, x1, y1, seg_rapid in segments:
+                if seg_rapid != pass_rapid:
+                    continue
+                px0, py0 = world_to_canvas(x0, y0)
+                px1, py1 = world_to_canvas(x1, y1)
+                # skip if fully out of view
+                if (max(px0, px1) < 0 or min(px0, px1) > cw or
+                        max(py0, py1) < 0 or min(py0, py1) > ch):
+                    continue
+                if dash:
+                    canvas.create_line(px0, py0, px1, py1,
+                                       fill=color, width=width, dash=dash)
+                else:
+                    canvas.create_line(px0, py0, px1, py1,
+                                       fill=color, width=width)
+
+    def fit_view(event=None):
+        """Fit the entire toolpath into the canvas with padding."""
+        cw = canvas.winfo_width()
+        ch = canvas.winfo_height()
+        if cw < 2 or ch < 2:
+            win.after(50, fit_view)
+            return
+
+        scale_x = (cw - 2 * PADDING) / span_x
+        scale_y = (ch - 2 * PADDING) / span_y
+        s = min(scale_x, scale_y)
+
+        # center
+        view["scale"] = s
+        view["ox"] = (cw - span_x * s) / 2 - min_x * s
+        view["oy"] = (ch - span_y * s) / 2 + max_y * s
+        draw_all()
+
+    # ── interaction ───────────────────────────────────────────────────────────
+
+    def on_mouse_press(event):
+        drag["x"] = event.x
+        drag["y"] = event.y
+        drag["active"] = True
+        canvas.config(cursor="fleur")
+
+    def on_mouse_release(event):
+        drag["active"] = False
+        canvas.config(cursor="")
+
+    def on_mouse_drag(event):
+        if not drag["active"]:
+            return
+        dx = event.x - drag["x"]
+        dy = event.y - drag["y"]
+        view["ox"] += dx
+        view["oy"] += dy
+        drag["x"] = event.x
+        drag["y"] = event.y
+        draw_all()
+
+    def on_zoom(event):
+        # mouse wheel: zoom toward cursor position
+        factor = 1.15 if event.delta > 0 else (1 / 1.15)
+        mx, my = event.x, event.y
+        view["ox"] = mx + (view["ox"] - mx) * factor
+        view["oy"] = my + (view["oy"] - my) * factor
+        view["scale"] *= factor
+        draw_all()
+
+    canvas.bind("<ButtonPress-1>",   on_mouse_press)
+    canvas.bind("<ButtonRelease-1>", on_mouse_release)
+    canvas.bind("<B1-Motion>",       on_mouse_drag)
+    canvas.bind("<MouseWheel>",      on_zoom)          # Windows / macOS
+    canvas.bind("<Button-4>",        lambda e: on_zoom(
+        type("E", (), {"delta": 1, "x": e.x, "y": e.y})()))   # Linux scroll up
+    canvas.bind("<Button-5>",        lambda e: on_zoom(
+        type("E", (), {"delta": -1, "x": e.x, "y": e.y})()))  # Linux scroll down
+
+    canvas.bind("<Configure>", lambda e: fit_view())
+
+    # initial draw after window is laid out
+    win.after(100, fit_view)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -63,30 +329,12 @@ def convert_file(input_path, output_path, log_fn,
         return coords
 
     # ── G2/G3 with R format ───────────────────────────────────────────────────
-    #
-    # WHY R and not I/J:
-    # ──────────────────
-    # ISEL stores arc center as absolute coordinates (I/J) and end point as
-    # absolute coords (X/Y) – both in the same integer unit space.
-    # After /1000 conversion, floating-point rounding makes:
-    #   r_from_start  ≠  r_from_end   (can differ by >1 mm for large arcs)
-    #
-    # With I/J format the controller checks both radii and alarms.
-    # With R format the controller uses the START point + R to draw the arc
-    # and drives to the programmed END point – no radius consistency check.
-    # Logosol CNC explicitly supports: G2 X.. Y.. R.. F..
-    #
-    # R sign convention (standard):
-    #   R > 0  →  arc ≤ 180°  (minor arc)
-    #   R < 0  →  arc > 180°  (major arc)
-
     def arc_to_g2g3(start, end, center, cw):
         nonlocal total_time_min, current_feed
 
         cx, cy = center["X"], center["Y"]
         r  = math.hypot(start["X"] - cx, start["Y"] - cy)
 
-        # arc angle span for time estimate + R sign
         a0 = math.atan2(start["Y"] - cy, start["X"] - cx)
         a1 = math.atan2(end["Y"]   - cy, end["X"]   - cx)
 
@@ -95,15 +343,12 @@ def convert_file(input_path, output_path, log_fn,
         else:
             if a1 <= a0: a1 += 2 * math.pi
 
-        span = abs(a1 - a0)           # always positive, 0 < span ≤ 2π
-
+        span = abs(a1 - a0)
         arc_len = span * r
         if current_feed:
             total_time_min += arc_len / current_feed
 
-        # R sign: negative means major arc (> 180°)
         r_signed = r if span <= math.pi else -r
-
         code  = "G2" if cw else "G3"
         gline = (nline() +
                  f"{code} X{end['X']:.4f} Y{end['Y']:.4f} R{r_signed:.4f}")
@@ -111,7 +356,6 @@ def convert_file(input_path, output_path, log_fn,
         return end.copy(), [gline]
 
     # ── arc linearisation – numpy ─────────────────────────────────────────────
-
     def linearize_arc_numpy(start, end, center, cw):
         nonlocal total_time_min, current_feed, line_no
 
@@ -157,7 +401,6 @@ def convert_file(input_path, output_path, log_fn,
         return pos, lines
 
     # ── arc linearisation – pure Python ──────────────────────────────────────
-
     def linearize_arc_pure(start, end, center, cw):
         nonlocal total_time_min, current_feed, line_no
 
@@ -202,7 +445,6 @@ def convert_file(input_path, output_path, log_fn,
         return pos, lines
 
     # ── choose handler ────────────────────────────────────────────────────────
-
     if use_arc_commands:
         handle_arc = arc_to_g2g3
     elif _NUMPY:
@@ -211,7 +453,6 @@ def convert_file(input_path, output_path, log_fn,
         handle_arc = linearize_arc_pure
 
     # ── first pass: count lines ───────────────────────────────────────────────
-
     try:
         with open(input_path, "r", encoding="utf-8", errors="replace") as f:
             total_lines = sum(
@@ -230,7 +471,6 @@ def convert_file(input_path, output_path, log_fn,
         progress_callback(0, "Reading file…")
 
     # ── open output ───────────────────────────────────────────────────────────
-
     try:
         out_f = open(output_path, "w", encoding="utf-8", buffering=256 * 1024)
     except Exception as e:
@@ -240,9 +480,7 @@ def convert_file(input_path, output_path, log_fn,
         out_f.write(line + "\n")
 
     # ── main loop ─────────────────────────────────────────────────────────────
-
     try:
-        # ── Logosol-safe header ───────────────────────────────────────────────
         emit(nline() + "G21")
         emit(nline() + "G17")
         emit(nline() + "G40")
@@ -335,17 +573,13 @@ def convert_file(input_path, output_path, log_fn,
                         end = last_pos.copy()
                         end.update(c)
 
-                        # FIX v1.92: ISEL I/J are ABSOLUTE coordinates, not
-                        # offsets from the current position. Previous code did
-                        # last_pos + I/J which inflated the radius by ~10x and
-                        # turned every small arc into a near-full-circle,
-                        # causing ~7000 segments per arc and 8+ GB output files.
+                        # FIX v1.92: ISEL I/J are ABSOLUTE coordinates,
+                        # not offsets from current position.
                         center = {
                             "X": ij.get("I", 0.0),
                             "Y": ij.get("J", 0.0),
                         }
 
-                        # guard: zero-radius arc would crash atan2 logic
                         r_check = math.hypot(last_pos["X"] - center["X"],
                                              last_pos["Y"] - center["Y"])
                         if r_check < 1e-6:
@@ -450,6 +684,9 @@ def run_gui():
                     f"Conversion finished!\nMode: {mode_str}\n\n"
                     f"Estimated time: {m} min {s} sec"
                 )
+                # ── auto-open preview ─────────────────────────────────────
+                open_preview(root, out_path)
+
             root.after(0, on_done)
 
         except Exception as e:
