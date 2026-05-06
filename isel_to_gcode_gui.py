@@ -1,7 +1,7 @@
 try:
     from version import APP_VERSION
 except ImportError:
-    APP_VERSION = "1.94"
+    APP_VERSION = "1.95"
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -32,8 +32,8 @@ FG  = "#ffffff"
 BTN = "#2d2d2d"
 
 # ── preview colors ────────────────────────────────────────────────────────────
-COLOR_CUT   = "#00c8ff"   # G1 cutting moves  — cyan
-COLOR_RAPID = "#ff4444"   # G0 rapid moves    — red dashed
+COLOR_CUT   = "#00c8ff"
+COLOR_RAPID = "#ff4444"
 COLOR_BG    = "#121212"
 COLOR_GRID  = "#2a2a2a"
 COLOR_AXIS  = "#3a3a3a"
@@ -46,15 +46,13 @@ COLOR_AXIS  = "#3a3a3a"
 def open_preview(parent, gcode_path):
     """
     Parse output G-code and draw toolpath on a canvas.
-    - Segments grouped into polylines per move type for speed (~3k draw calls vs 123k)
-    - Toggle between 2D top-down and isometric (X/Y/Z) projection
-    - Pan: left-click drag   |   Zoom: mouse wheel   |   Fit: button
+    - Segments grouped into polylines per move type for speed
+    - Toggle between 2D top-down and isometric projection
+    - Pan: left-click drag  |  Zoom: mouse wheel  |  Fit: button
     """
 
     # ── parse G-code ──────────────────────────────────────────────────────────
-    # Each point: (x, y, z, is_rapid)
-    points = []   # raw 3-D path
-
+    points = []   # (x, y, z, is_rapid)
     cx, cy, cz = 0.0, 0.0, 0.0
     is_rapid   = False
 
@@ -64,29 +62,22 @@ def open_preview(parent, gcode_path):
                 ln = re.sub(r"^N\d+\s*", "", raw.strip())
                 if not ln:
                     continue
-
                 if ln.startswith("G0"):
                     is_rapid = True
                 elif re.match(r"G[123]\b", ln):
                     is_rapid = False
                 else:
                     continue
-
                 xm = re.search(r"X(-?\d+(?:\.\d+)?)", ln)
                 ym = re.search(r"Y(-?\d+(?:\.\d+)?)", ln)
                 zm = re.search(r"Z(-?\d+(?:\.\d+)?)", ln)
-
                 nx = float(xm.group(1)) if xm else cx
                 ny = float(ym.group(1)) if ym else cy
                 nz = float(zm.group(1)) if zm else cz
-
-                points.append((cx, cy, cz, is_rapid))   # start of segment
+                points.append((cx, cy, cz, is_rapid))
                 cx, cy, cz = nx, ny, nz
-
-        # add final position
         if points:
             points.append((cx, cy, cz, is_rapid))
-
     except Exception as e:
         messagebox.showerror("Preview Error", f"Could not read G-code:\n{e}",
                              parent=parent)
@@ -97,8 +88,7 @@ def open_preview(parent, gcode_path):
                             parent=parent)
         return
 
-    # ── group into polylines (same type → one draw call) ─────────────────────
-    # Each group: {"rapid": bool, "pts": [(x,y,z), ...]}
+    # ── group consecutive same-type segments into polylines ───────────────────
     def build_groups(pts):
         groups = []
         cur    = None
@@ -111,13 +101,10 @@ def open_preview(parent, gcode_path):
 
     raw_groups = build_groups(points)
 
-    # bounding box
     all_x = [p[0] for p in points]
     all_y = [p[1] for p in points]
-    all_z = [p[2] for p in points]
     min_x, max_x = min(all_x), max(all_x)
     min_y, max_y = min(all_y), max(all_y)
-    min_z, max_z = min(all_z), max(all_z)
     span_x = max_x - min_x or 1.0
     span_y = max_y - min_y or 1.0
 
@@ -153,25 +140,21 @@ def open_preview(parent, gcode_path):
     tk.Label(toolbar, text=stats, bg=BTN, fg="#777777",
              font=("Consolas", 9)).pack(side=tk.LEFT, padx=6)
 
-    # projection toggle
     iso_var = tk.BooleanVar(value=False)
 
     def toggle_iso():
-        fit_view()   # refit whenever projection changes
+        fit_view()
 
     iso_chk = tk.Checkbutton(
-        toolbar, text="Isometric", variable=iso_var,
-        command=toggle_iso,
+        toolbar, text="Isometric", variable=iso_var, command=toggle_iso,
         bg=BTN, fg=FG, selectcolor="#3a7afe",
-        activebackground=BTN, activeforeground=FG,
-        font=("Consolas", 9)
+        activebackground=BTN, activeforeground=FG, font=("Consolas", 9)
     )
     iso_chk.pack(side=tk.RIGHT, padx=6)
 
-    fit_btn = tk.Button(toolbar, text="Fit", bg="#3a7afe", fg="white",
-                        font=("Consolas", 9), relief="flat", padx=8,
-                        command=lambda: fit_view())
-    fit_btn.pack(side=tk.RIGHT, padx=6)
+    tk.Button(toolbar, text="Fit", bg="#3a7afe", fg="white",
+              font=("Consolas", 9), relief="flat", padx=8,
+              command=lambda: fit_view()).pack(side=tk.RIGHT, padx=6)
 
     # ── canvas ────────────────────────────────────────────────────────────────
     canvas = tk.Canvas(win, bg=COLOR_BG, highlightthickness=0)
@@ -180,33 +163,21 @@ def open_preview(parent, gcode_path):
     # ── view state ────────────────────────────────────────────────────────────
     view = {"ox": 0.0, "oy": 0.0, "scale": 1.0}
     drag = {"x": 0, "y": 0, "active": False}
-    PADDING = 48
-
-    # ── isometric projection constants ────────────────────────────────────────
-    # Standard isometric: 30° angles
-    # X axis → right-down,  Y axis → left-down,  Z axis → straight up
+    PADDING   = 48
     ISO_ANGLE = math.radians(30)
-    ISO_CX    =  math.cos(ISO_ANGLE)   # ≈ 0.866
-    ISO_CY    =  math.sin(ISO_ANGLE)   # ≈ 0.500
+    ISO_CX    = math.cos(ISO_ANGLE)
+    ISO_CY    = math.sin(ISO_ANGLE)
 
     def project(wx, wy, wz):
-        """
-        Convert 3-D world (mm) to 2-D canvas coordinates.
-        2D mode:  top-down, Y-flipped (G-code Y+ → canvas up)
-        ISO mode: isometric projection with Z as height
-        """
         s = view["scale"]
         if iso_var.get():
-            # isometric: X→right-down, Y→left-down, Z→up
             px = (wx - wy) * ISO_CX
             py = (wx + wy) * ISO_CY - wz
             return view["ox"] + px * s, view["oy"] + py * s
         else:
-            # top-down 2D, Y-axis flipped
             return view["ox"] + wx * s, view["oy"] - wy * s
 
     def projected_bounds():
-        """Return screen bounding box of all points at scale=1, offset=0."""
         if iso_var.get():
             pxs = [(p[0] - p[1]) * ISO_CX for p in points]
             pys = [(p[0] + p[1]) * ISO_CY - p[2] for p in points]
@@ -222,17 +193,16 @@ def open_preview(parent, gcode_path):
         if cw < 2 or ch < 2:
             return
 
-        # ── grid (2D only — skip in iso for clarity) ──────────────────────
+        # grid (2D only)
         if not iso_var.get():
             s = view["scale"]
-            raw_step = 50.0 / s
+            raw_step  = 50.0 / s
             magnitude = 10 ** math.floor(math.log10(max(raw_step, 1e-9)))
             grid_step = magnitude
             for mult in (1, 2, 5, 10):
                 if magnitude * mult >= raw_step:
                     grid_step = magnitude * mult
                     break
-
             gx = math.floor(min_x / grid_step) * grid_step
             while gx <= max_x + grid_step:
                 px, _ = project(gx, 0, 0)
@@ -242,7 +212,6 @@ def open_preview(parent, gcode_path):
                                        fill="#4a4a4a", font=("Consolas", 7),
                                        anchor="w")
                 gx += grid_step
-
             gy = math.floor(min_y / grid_step) * grid_step
             while gy <= max_y + grid_step:
                 _, py = project(0, gy, 0)
@@ -252,37 +221,29 @@ def open_preview(parent, gcode_path):
                                        fill="#4a4a4a", font=("Consolas", 7),
                                        anchor="sw")
                 gy += grid_step
-
-            # origin axes
             ox_px, oy_px = project(0, 0, 0)
             canvas.create_line(ox_px, 0, ox_px, ch, fill=COLOR_AXIS, width=1)
             canvas.create_line(0, oy_px, cw, oy_px, fill=COLOR_AXIS, width=1)
 
-        # ── draw polylines: rapid first (behind), cut on top ─────────────
+        # draw: rapid behind, cut on top
         for pass_rapid in (True, False):
             color = COLOR_RAPID if pass_rapid else COLOR_CUT
             dash  = (4, 4) if pass_rapid else None
-
             for grp in raw_groups:
                 if grp["rapid"] != pass_rapid:
                     continue
                 pts = grp["pts"]
                 if len(pts) < 2:
                     continue
-
-                # project all points
                 flat = []
                 for wx, wy, wz in pts:
                     px, py = project(wx, wy, wz)
                     flat.extend((px, py))
-
-                # coarse clip: skip group if all points outside canvas
                 xs = flat[0::2]
                 ys = flat[1::2]
                 if (min(xs) > cw or max(xs) < 0 or
                         min(ys) > ch or max(ys) < 0):
                     continue
-
                 if dash:
                     canvas.create_line(*flat, fill=color, width=1, dash=dash)
                 else:
@@ -294,21 +255,17 @@ def open_preview(parent, gcode_path):
         if cw < 2 or ch < 2:
             win.after(60, fit_view)
             return
-
         px_min, px_max, py_min, py_max = projected_bounds()
         span_px = px_max - px_min or 1.0
         span_py = py_max - py_min or 1.0
-
         sx = (cw - 2 * PADDING) / span_px
         sy = (ch - 2 * PADDING) / span_py
         s  = min(sx, sy)
-
         view["scale"] = s
         view["ox"]    = (cw - span_px * s) / 2 - px_min * s
         view["oy"]    = (ch - span_py * s) / 2 - py_min * s
         draw_all()
 
-    # ── interaction ───────────────────────────────────────────────────────────
     def on_press(e):
         drag["x"] = e.x; drag["y"] = e.y; drag["active"] = True
         canvas.config(cursor="fleur")
@@ -613,12 +570,13 @@ def convert_file(input_path, output_path, log_fn,
 def run_gui():
     root = TkinterDnD.Tk()
     root.title(f"ISEL → G-code Converter v{APP_VERSION}")
-    root.geometry("520x500")
+    root.geometry("520x520")
     root.configure(bg=BG)
 
-    input_var   = tk.StringVar()
-    use_arc_var = tk.BooleanVar(value=False)
-    converting  = False
+    input_var    = tk.StringVar()
+    use_arc_var  = tk.BooleanVar(value=False)
+    converting   = False
+    last_output  = {"path": None}   # path of last successfully converted file
 
     try:
         root.iconbitmap("icon.ico")
@@ -651,6 +609,11 @@ def run_gui():
             input_var.set(path)
             log(f"File selected: {path}")
 
+    def show_preview():
+        path = last_output["path"]
+        if path and os.path.isfile(path):
+            open_preview(root, path)
+
     def _do_convert(in_path, out_path, arc_mode):
         nonlocal converting
 
@@ -671,6 +634,9 @@ def run_gui():
                        "G1 + numpy" if _NUMPY else "G1 linearised")
 
             def on_done():
+                last_output["path"] = out_path
+                preview_btn.config(state="normal")   # enable preview button
+
                 log("-" * 50)
                 log(f"✓ Conversion completed  ({mode_str})")
                 log(f"⏱ Estimated program time: {m} min {s} sec")
@@ -681,7 +647,6 @@ def run_gui():
                     f"Conversion finished!\nMode: {mode_str}\n\n"
                     f"Estimated time: {m} min {s} sec"
                 )
-                open_preview(root, out_path)
 
             root.after(0, on_done)
 
@@ -718,6 +683,7 @@ def run_gui():
 
         arc_mode   = use_arc_var.get()
         converting = True
+        preview_btn.config(state="disabled")         # reset preview until done
         convert_btn.config(state="disabled", text="Converting...")
         browse_btn.config(state="disabled")
         progress_bar["value"] = 0
@@ -760,6 +726,12 @@ def run_gui():
                             bg="#3a7afe", fg="white", width=12,
                             font=("Arial", 10, "bold"))
     convert_btn.pack(side=tk.LEFT, padx=5)
+
+    # Preview button — disabled until a successful conversion exists
+    preview_btn = tk.Button(btn_frame, text="Preview", command=show_preview,
+                            bg="#2a6a2a", fg="white", width=12,
+                            font=("Arial", 10, "bold"), state="disabled")
+    preview_btn.pack(side=tk.LEFT, padx=5)
 
     numpy_text  = ("⚡ numpy detected – arc linearisation accelerated"
                    if _NUMPY else "⚠ numpy not found – pip install numpy")
