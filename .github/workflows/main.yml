@@ -6,16 +6,19 @@ on:
       - main
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v5.6.0
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -29,7 +32,7 @@ jobs:
           pyinstaller --onefile --windowed --icon=icon.ico --collect-all tkinterdnd2 --hidden-import=numpy --name ISEL_to_Gcode isel_to_gcode_gui.py
 
       - name: Upload EXE
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v4
         with:
           name: ISEL_to_Gcode_EXE
           path: dist/ISEL_to_Gcode.exe
