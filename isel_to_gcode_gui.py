@@ -1,7 +1,7 @@
 try:
     from version import APP_VERSION
 except ImportError:
-    APP_VERSION = "1.93"
+    APP_VERSION = "1.94"
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -33,10 +33,10 @@ BTN = "#2d2d2d"
 
 # ── preview colors ────────────────────────────────────────────────────────────
 COLOR_CUT   = "#00c8ff"   # G1 cutting moves  — cyan
-COLOR_RAPID = "#ff4444"   # G0 rapid moves    — red
-COLOR_BG    = "#121212"   # canvas background
-COLOR_GRID  = "#2a2a2a"   # grid lines
-COLOR_AXIS  = "#3a3a3a"   # axis lines
+COLOR_RAPID = "#ff4444"   # G0 rapid moves    — red dashed
+COLOR_BG    = "#121212"
+COLOR_GRID  = "#2a2a2a"
+COLOR_AXIS  = "#3a3a3a"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -45,101 +45,133 @@ COLOR_AXIS  = "#3a3a3a"   # axis lines
 
 def open_preview(parent, gcode_path):
     """
-    Parse the output G-code file and draw all moves on a canvas.
-    G0  → rapid (red, thin dashed)
-    G1/G2/G3 → cutting (cyan, solid)
-    Pan with left-click drag, zoom with mouse wheel.
+    Parse output G-code and draw toolpath on a canvas.
+    - Segments grouped into polylines per move type for speed (~3k draw calls vs 123k)
+    - Toggle between 2D top-down and isometric (X/Y/Z) projection
+    - Pan: left-click drag   |   Zoom: mouse wheel   |   Fit: button
     """
 
-    # ── parse G-code into move segments ──────────────────────────────────────
-    segments = []   # list of (x0,y0, x1,y1, is_rapid)
+    # ── parse G-code ──────────────────────────────────────────────────────────
+    # Each point: (x, y, z, is_rapid)
+    points = []   # raw 3-D path
 
-    cx_pos, cy_pos = 0.0, 0.0
-    is_rapid = False
+    cx, cy, cz = 0.0, 0.0, 0.0
+    is_rapid   = False
 
     try:
         with open(gcode_path, "r", encoding="utf-8", errors="replace") as f:
             for raw in f:
-                line = raw.strip()
-                # strip line number
-                line = re.sub(r"^N\d+\s*", "", line)
-
-                if not line:
+                ln = re.sub(r"^N\d+\s*", "", raw.strip())
+                if not ln:
                     continue
 
-                # detect move type
-                if line.startswith("G0"):
+                if ln.startswith("G0"):
                     is_rapid = True
-                elif re.match(r"G[123]\b", line):
+                elif re.match(r"G[123]\b", ln):
                     is_rapid = False
                 else:
-                    # non-move command — skip but don't reset position
                     continue
 
-                # extract X / Y (ignore Z for 2D preview)
-                xm = re.search(r"X(-?\d+(?:\.\d+)?)", line)
-                ym = re.search(r"Y(-?\d+(?:\.\d+)?)", line)
+                xm = re.search(r"X(-?\d+(?:\.\d+)?)", ln)
+                ym = re.search(r"Y(-?\d+(?:\.\d+)?)", ln)
+                zm = re.search(r"Z(-?\d+(?:\.\d+)?)", ln)
 
-                nx = float(xm.group(1)) if xm else cx_pos
-                ny = float(ym.group(1)) if ym else cy_pos
+                nx = float(xm.group(1)) if xm else cx
+                ny = float(ym.group(1)) if ym else cy
+                nz = float(zm.group(1)) if zm else cz
 
-                segments.append((cx_pos, cy_pos, nx, ny, is_rapid))
-                cx_pos, cy_pos = nx, ny
+                points.append((cx, cy, cz, is_rapid))   # start of segment
+                cx, cy, cz = nx, ny, nz
+
+        # add final position
+        if points:
+            points.append((cx, cy, cz, is_rapid))
 
     except Exception as e:
         messagebox.showerror("Preview Error", f"Could not read G-code:\n{e}",
                              parent=parent)
         return
 
-    if not segments:
+    if not points:
         messagebox.showinfo("Preview", "No moves found in G-code file.",
                             parent=parent)
         return
 
-    # ── compute bounding box ──────────────────────────────────────────────────
-    all_x = [s[0] for s in segments] + [s[2] for s in segments]
-    all_y = [s[1] for s in segments] + [s[3] for s in segments]
+    # ── group into polylines (same type → one draw call) ─────────────────────
+    # Each group: {"rapid": bool, "pts": [(x,y,z), ...]}
+    def build_groups(pts):
+        groups = []
+        cur    = None
+        for x, y, z, rapid in pts:
+            if cur is None or cur["rapid"] != rapid:
+                cur = {"rapid": rapid, "pts": []}
+                groups.append(cur)
+            cur["pts"].append((x, y, z))
+        return groups
+
+    raw_groups = build_groups(points)
+
+    # bounding box
+    all_x = [p[0] for p in points]
+    all_y = [p[1] for p in points]
+    all_z = [p[2] for p in points]
     min_x, max_x = min(all_x), max(all_x)
     min_y, max_y = min(all_y), max(all_y)
+    min_z, max_z = min(all_z), max(all_z)
     span_x = max_x - min_x or 1.0
     span_y = max_y - min_y or 1.0
 
-    # ── window setup ──────────────────────────────────────────────────────────
+    cut_count   = sum(1 for p in points if not p[3])
+    rapid_count = sum(1 for p in points if p[3])
+
+    # ── window ────────────────────────────────────────────────────────────────
     win = tk.Toplevel(parent)
     win.title(f"Path Preview — {os.path.basename(gcode_path)}")
-    win.geometry("900x700")
+    win.geometry("960x720")
     win.configure(bg=BG)
     win.resizable(True, True)
 
     # ── toolbar ───────────────────────────────────────────────────────────────
-    toolbar = tk.Frame(win, bg=BTN, pady=4)
+    toolbar = tk.Frame(win, bg=BTN, pady=5)
     toolbar.pack(fill=tk.X)
 
     tk.Label(toolbar, text="Path Preview", bg=BTN, fg=FG,
              font=("Consolas", 10, "bold")).pack(side=tk.LEFT, padx=10)
 
-    # legend
     tk.Label(toolbar, text="━━", bg=BTN, fg=COLOR_CUT,
-             font=("Consolas", 11)).pack(side=tk.LEFT, padx=(20, 2))
-    tk.Label(toolbar, text="Cutting (G1)", bg=BTN, fg=FG,
+             font=("Consolas", 11)).pack(side=tk.LEFT, padx=(16, 2))
+    tk.Label(toolbar, text="Cut", bg=BTN, fg=FG,
              font=("Consolas", 9)).pack(side=tk.LEFT)
 
     tk.Label(toolbar, text="━━", bg=BTN, fg=COLOR_RAPID,
-             font=("Consolas", 11)).pack(side=tk.LEFT, padx=(16, 2))
-    tk.Label(toolbar, text="Rapid (G0)", bg=BTN, fg=FG,
+             font=("Consolas", 11)).pack(side=tk.LEFT, padx=(12, 2))
+    tk.Label(toolbar, text="Rapid", bg=BTN, fg=FG,
              font=("Consolas", 9)).pack(side=tk.LEFT)
 
-    # stats
-    cut_count   = sum(1 for s in segments if not s[4])
-    rapid_count = sum(1 for s in segments if s[4])
-    stats_text  = (f"  |  Moves: {cut_count:,} cut   {rapid_count:,} rapid"
-                   f"  |  W:{span_x:.1f}mm  H:{span_y:.1f}mm")
-    tk.Label(toolbar, text=stats_text, bg=BTN, fg="#888888",
-             font=("Consolas", 9)).pack(side=tk.LEFT, padx=10)
+    stats = (f"   {cut_count:,} cut  {rapid_count:,} rapid"
+             f"   W:{span_x:.1f}  H:{span_y:.1f} mm")
+    tk.Label(toolbar, text=stats, bg=BTN, fg="#777777",
+             font=("Consolas", 9)).pack(side=tk.LEFT, padx=6)
 
-    tk.Button(toolbar, text="Fit", bg="#3a7afe", fg="white",
-              font=("Consolas", 9), relief="flat", padx=8,
-              command=lambda: fit_view()).pack(side=tk.RIGHT, padx=8)
+    # projection toggle
+    iso_var = tk.BooleanVar(value=False)
+
+    def toggle_iso():
+        fit_view()   # refit whenever projection changes
+
+    iso_chk = tk.Checkbutton(
+        toolbar, text="Isometric", variable=iso_var,
+        command=toggle_iso,
+        bg=BTN, fg=FG, selectcolor="#3a7afe",
+        activebackground=BTN, activeforeground=FG,
+        font=("Consolas", 9)
+    )
+    iso_chk.pack(side=tk.RIGHT, padx=6)
+
+    fit_btn = tk.Button(toolbar, text="Fit", bg="#3a7afe", fg="white",
+                        font=("Consolas", 9), relief="flat", padx=8,
+                        command=lambda: fit_view())
+    fit_btn.pack(side=tk.RIGHT, padx=6)
 
     # ── canvas ────────────────────────────────────────────────────────────────
     canvas = tk.Canvas(win, bg=COLOR_BG, highlightthickness=0)
@@ -148,16 +180,40 @@ def open_preview(parent, gcode_path):
     # ── view state ────────────────────────────────────────────────────────────
     view = {"ox": 0.0, "oy": 0.0, "scale": 1.0}
     drag = {"x": 0, "y": 0, "active": False}
+    PADDING = 48
 
-    PADDING = 40   # px padding around content when fitting
+    # ── isometric projection constants ────────────────────────────────────────
+    # Standard isometric: 30° angles
+    # X axis → right-down,  Y axis → left-down,  Z axis → straight up
+    ISO_ANGLE = math.radians(30)
+    ISO_CX    =  math.cos(ISO_ANGLE)   # ≈ 0.866
+    ISO_CY    =  math.sin(ISO_ANGLE)   # ≈ 0.500
 
-    def world_to_canvas(wx, wy):
-        """Convert mm world coords to canvas pixel coords."""
-        s  = view["scale"]
-        px = view["ox"] + wx * s
-        # Y axis: G-code Y+ is "up", canvas Y+ is down — flip
-        py = view["oy"] - wy * s
-        return px, py
+    def project(wx, wy, wz):
+        """
+        Convert 3-D world (mm) to 2-D canvas coordinates.
+        2D mode:  top-down, Y-flipped (G-code Y+ → canvas up)
+        ISO mode: isometric projection with Z as height
+        """
+        s = view["scale"]
+        if iso_var.get():
+            # isometric: X→right-down, Y→left-down, Z→up
+            px = (wx - wy) * ISO_CX
+            py = (wx + wy) * ISO_CY - wz
+            return view["ox"] + px * s, view["oy"] + py * s
+        else:
+            # top-down 2D, Y-axis flipped
+            return view["ox"] + wx * s, view["oy"] - wy * s
+
+    def projected_bounds():
+        """Return screen bounding box of all points at scale=1, offset=0."""
+        if iso_var.get():
+            pxs = [(p[0] - p[1]) * ISO_CX for p in points]
+            pys = [(p[0] + p[1]) * ISO_CY - p[2] for p in points]
+        else:
+            pxs = [p[0] for p in points]
+            pys = [-p[1] for p in points]
+        return min(pxs), max(pxs), min(pys), max(pys)
 
     def draw_all():
         canvas.delete("all")
@@ -166,134 +222,125 @@ def open_preview(parent, gcode_path):
         if cw < 2 or ch < 2:
             return
 
-        # grid (light)
-        s = view["scale"]
-        # choose grid spacing so cells are ~50-100 px
-        raw_step = 50.0 / s
-        # round to nice number
-        magnitude = 10 ** math.floor(math.log10(raw_step)) if raw_step > 0 else 1
-        for mult in (1, 2, 5, 10):
-            if magnitude * mult >= raw_step:
-                grid_step = magnitude * mult
-                break
-        else:
-            grid_step = magnitude * 10
+        # ── grid (2D only — skip in iso for clarity) ──────────────────────
+        if not iso_var.get():
+            s = view["scale"]
+            raw_step = 50.0 / s
+            magnitude = 10 ** math.floor(math.log10(max(raw_step, 1e-9)))
+            grid_step = magnitude
+            for mult in (1, 2, 5, 10):
+                if magnitude * mult >= raw_step:
+                    grid_step = magnitude * mult
+                    break
 
-        # vertical grid lines
-        x_start = math.floor(min_x / grid_step) * grid_step - grid_step
-        x_end   = max_x + grid_step
-        gx = x_start
-        while gx <= x_end:
-            px, _ = world_to_canvas(gx, 0)
-            if 0 <= px <= cw:
-                canvas.create_line(px, 0, px, ch, fill=COLOR_GRID, width=1)
-                canvas.create_text(px + 2, ch - 12, text=f"{gx:.0f}",
-                                   fill="#555555", font=("Consolas", 7),
-                                   anchor="w")
-            gx += grid_step
+            gx = math.floor(min_x / grid_step) * grid_step
+            while gx <= max_x + grid_step:
+                px, _ = project(gx, 0, 0)
+                if 0 <= px <= cw:
+                    canvas.create_line(px, 0, px, ch, fill=COLOR_GRID, width=1)
+                    canvas.create_text(px + 2, ch - 12, text=f"{gx:.0f}",
+                                       fill="#4a4a4a", font=("Consolas", 7),
+                                       anchor="w")
+                gx += grid_step
 
-        # horizontal grid lines
-        y_start = math.floor(min_y / grid_step) * grid_step - grid_step
-        y_end   = max_y + grid_step
-        gy = y_start
-        while gy <= y_end:
-            _, py = world_to_canvas(0, gy)
-            if 0 <= py <= ch:
-                canvas.create_line(0, py, cw, py, fill=COLOR_GRID, width=1)
-                canvas.create_text(4, py - 2, text=f"{gy:.0f}",
-                                   fill="#555555", font=("Consolas", 7),
-                                   anchor="sw")
-            gy += grid_step
+            gy = math.floor(min_y / grid_step) * grid_step
+            while gy <= max_y + grid_step:
+                _, py = project(0, gy, 0)
+                if 0 <= py <= ch:
+                    canvas.create_line(0, py, cw, py, fill=COLOR_GRID, width=1)
+                    canvas.create_text(4, py - 2, text=f"{gy:.0f}",
+                                       fill="#4a4a4a", font=("Consolas", 7),
+                                       anchor="sw")
+                gy += grid_step
 
-        # origin cross
-        ox_px, oy_px = world_to_canvas(0, 0)
-        canvas.create_line(ox_px, 0, ox_px, ch, fill=COLOR_AXIS, width=1)
-        canvas.create_line(0, oy_px, cw, oy_px, fill=COLOR_AXIS, width=1)
+            # origin axes
+            ox_px, oy_px = project(0, 0, 0)
+            canvas.create_line(ox_px, 0, ox_px, ch, fill=COLOR_AXIS, width=1)
+            canvas.create_line(0, oy_px, cw, oy_px, fill=COLOR_AXIS, width=1)
 
-        # draw moves — rapid first (underneath), then cuts on top
+        # ── draw polylines: rapid first (behind), cut on top ─────────────
         for pass_rapid in (True, False):
             color = COLOR_RAPID if pass_rapid else COLOR_CUT
-            width = 1 if pass_rapid else 1
             dash  = (4, 4) if pass_rapid else None
 
-            for x0, y0, x1, y1, seg_rapid in segments:
-                if seg_rapid != pass_rapid:
+            for grp in raw_groups:
+                if grp["rapid"] != pass_rapid:
                     continue
-                px0, py0 = world_to_canvas(x0, y0)
-                px1, py1 = world_to_canvas(x1, y1)
-                # skip if fully out of view
-                if (max(px0, px1) < 0 or min(px0, px1) > cw or
-                        max(py0, py1) < 0 or min(py0, py1) > ch):
+                pts = grp["pts"]
+                if len(pts) < 2:
                     continue
+
+                # project all points
+                flat = []
+                for wx, wy, wz in pts:
+                    px, py = project(wx, wy, wz)
+                    flat.extend((px, py))
+
+                # coarse clip: skip group if all points outside canvas
+                xs = flat[0::2]
+                ys = flat[1::2]
+                if (min(xs) > cw or max(xs) < 0 or
+                        min(ys) > ch or max(ys) < 0):
+                    continue
+
                 if dash:
-                    canvas.create_line(px0, py0, px1, py1,
-                                       fill=color, width=width, dash=dash)
+                    canvas.create_line(*flat, fill=color, width=1, dash=dash)
                 else:
-                    canvas.create_line(px0, py0, px1, py1,
-                                       fill=color, width=width)
+                    canvas.create_line(*flat, fill=color, width=1)
 
     def fit_view(event=None):
-        """Fit the entire toolpath into the canvas with padding."""
         cw = canvas.winfo_width()
         ch = canvas.winfo_height()
         if cw < 2 or ch < 2:
-            win.after(50, fit_view)
+            win.after(60, fit_view)
             return
 
-        scale_x = (cw - 2 * PADDING) / span_x
-        scale_y = (ch - 2 * PADDING) / span_y
-        s = min(scale_x, scale_y)
+        px_min, px_max, py_min, py_max = projected_bounds()
+        span_px = px_max - px_min or 1.0
+        span_py = py_max - py_min or 1.0
 
-        # center
+        sx = (cw - 2 * PADDING) / span_px
+        sy = (ch - 2 * PADDING) / span_py
+        s  = min(sx, sy)
+
         view["scale"] = s
-        view["ox"] = (cw - span_x * s) / 2 - min_x * s
-        view["oy"] = (ch - span_y * s) / 2 + max_y * s
+        view["ox"]    = (cw - span_px * s) / 2 - px_min * s
+        view["oy"]    = (ch - span_py * s) / 2 - py_min * s
         draw_all()
 
     # ── interaction ───────────────────────────────────────────────────────────
-
-    def on_mouse_press(event):
-        drag["x"] = event.x
-        drag["y"] = event.y
-        drag["active"] = True
+    def on_press(e):
+        drag["x"] = e.x; drag["y"] = e.y; drag["active"] = True
         canvas.config(cursor="fleur")
 
-    def on_mouse_release(event):
+    def on_release(e):
         drag["active"] = False
         canvas.config(cursor="")
 
-    def on_mouse_drag(event):
-        if not drag["active"]:
-            return
-        dx = event.x - drag["x"]
-        dy = event.y - drag["y"]
-        view["ox"] += dx
-        view["oy"] += dy
-        drag["x"] = event.x
-        drag["y"] = event.y
+    def on_drag(e):
+        if not drag["active"]: return
+        view["ox"] += e.x - drag["x"]
+        view["oy"] += e.y - drag["y"]
+        drag["x"] = e.x; drag["y"] = e.y
         draw_all()
 
-    def on_zoom(event):
-        # mouse wheel: zoom toward cursor position
-        factor = 1.15 if event.delta > 0 else (1 / 1.15)
-        mx, my = event.x, event.y
-        view["ox"] = mx + (view["ox"] - mx) * factor
-        view["oy"] = my + (view["oy"] - my) * factor
+    def on_zoom(e):
+        factor = 1.15 if e.delta > 0 else (1 / 1.15)
+        view["ox"] = e.x + (view["ox"] - e.x) * factor
+        view["oy"] = e.y + (view["oy"] - e.y) * factor
         view["scale"] *= factor
         draw_all()
 
-    canvas.bind("<ButtonPress-1>",   on_mouse_press)
-    canvas.bind("<ButtonRelease-1>", on_mouse_release)
-    canvas.bind("<B1-Motion>",       on_mouse_drag)
-    canvas.bind("<MouseWheel>",      on_zoom)          # Windows / macOS
-    canvas.bind("<Button-4>",        lambda e: on_zoom(
-        type("E", (), {"delta": 1, "x": e.x, "y": e.y})()))   # Linux scroll up
-    canvas.bind("<Button-5>",        lambda e: on_zoom(
-        type("E", (), {"delta": -1, "x": e.x, "y": e.y})()))  # Linux scroll down
+    canvas.bind("<ButtonPress-1>",   on_press)
+    canvas.bind("<ButtonRelease-1>", on_release)
+    canvas.bind("<B1-Motion>",       on_drag)
+    canvas.bind("<MouseWheel>",      on_zoom)
+    canvas.bind("<Button-4>",
+                lambda e: on_zoom(type("E",(),{"delta":1,"x":e.x,"y":e.y})()))
+    canvas.bind("<Button-5>",
+                lambda e: on_zoom(type("E",(),{"delta":-1,"x":e.x,"y":e.y})()))
+    canvas.bind("<Configure>",       lambda e: fit_view())
 
-    canvas.bind("<Configure>", lambda e: fit_view())
-
-    # initial draw after window is laid out
     win.after(100, fit_view)
 
 
@@ -316,11 +363,6 @@ def convert_file(input_path, output_path, log_fn,
         return s
 
     def parse_coord(text, axes=("X", "Y", "Z")):
-        """
-        Parse axis values from an ISEL command string.
-        All values are divided by SCALE (1000) to convert from microns to mm.
-        I/J in ISEL are ABSOLUTE coordinates (not offsets from current pos).
-        """
         coords = {}
         for axis in axes:
             m = re.search(rf"{axis}(-?\d+(?:\.\d+)?)", text)
@@ -328,100 +370,76 @@ def convert_file(input_path, output_path, log_fn,
                 coords[axis] = float(m.group(1)) / SCALE
         return coords
 
-    # ── G2/G3 with R format ───────────────────────────────────────────────────
     def arc_to_g2g3(start, end, center, cw):
         nonlocal total_time_min, current_feed
-
         cx, cy = center["X"], center["Y"]
         r  = math.hypot(start["X"] - cx, start["Y"] - cy)
-
         a0 = math.atan2(start["Y"] - cy, start["X"] - cx)
         a1 = math.atan2(end["Y"]   - cy, end["X"]   - cx)
-
         if cw:
             if a1 >= a0: a1 -= 2 * math.pi
         else:
             if a1 <= a0: a1 += 2 * math.pi
-
-        span = abs(a1 - a0)
+        span    = abs(a1 - a0)
         arc_len = span * r
         if current_feed:
             total_time_min += arc_len / current_feed
-
         r_signed = r if span <= math.pi else -r
         code  = "G2" if cw else "G3"
-        gline = (nline() +
-                 f"{code} X{end['X']:.4f} Y{end['Y']:.4f} R{r_signed:.4f}")
-
+        gline = nline() + f"{code} X{end['X']:.4f} Y{end['Y']:.4f} R{r_signed:.4f}"
         return end.copy(), [gline]
 
-    # ── arc linearisation – numpy ─────────────────────────────────────────────
     def linearize_arc_numpy(start, end, center, cw):
         nonlocal total_time_min, current_feed, line_no
-
         cx, cy = center["X"], center["Y"]
         z      = start["Z"]
         r      = math.hypot(start["X"] - cx, start["Y"] - cy)
         a0     = math.atan2(start["Y"] - cy, start["X"] - cx)
         a1     = math.atan2(end["Y"]   - cy, end["X"]   - cx)
-
         if cw:
             if a1 >= a0: a1 -= 2 * math.pi
         else:
             if a1 <= a0: a1 += 2 * math.pi
-
         arc_len = abs(a1 - a0) * r
         steps   = max(1, int(arc_len / ARC_RESOLUTION))
-
-        angles = np.linspace(a0, a1, steps + 1)[1:]
-        xs     = cx + r * np.cos(angles)
-        ys     = cy + r * np.sin(angles)
-
+        angles  = np.linspace(a0, a1, steps + 1)[1:]
+        xs      = cx + r * np.cos(angles)
+        ys      = cy + r * np.sin(angles)
         dx = np.diff(np.concatenate([[start["X"]], xs]))
         dy = np.diff(np.concatenate([[start["Y"]], ys]))
         if current_feed:
             total_time_min += float(np.sum(np.hypot(dx, dy))) / current_feed
-
         lines = [
             f"N{line_no + i:05d} G1 X{x:.3f} Y{y:.3f} Z{z:.3f}"
             for i, (x, y) in enumerate(zip(xs, ys))
         ]
         line_no += steps
-
         pos = {"X": float(xs[-1]), "Y": float(ys[-1]), "Z": z}
         fp  = end.copy()
         if abs(fp["X"] - pos["X"]) > 0.001 or abs(fp["Y"] - pos["Y"]) > 0.001:
             dist = math.hypot(fp["X"] - pos["X"], fp["Y"] - pos["Y"])
-            lines.append(nline() +
-                         f"G1 X{fp['X']:.3f} Y{fp['Y']:.3f} Z{fp['Z']:.3f}")
+            lines.append(nline() + f"G1 X{fp['X']:.3f} Y{fp['Y']:.3f} Z{fp['Z']:.3f}")
             if current_feed:
                 total_time_min += dist / current_feed
             pos = fp
-
         return pos, lines
 
-    # ── arc linearisation – pure Python ──────────────────────────────────────
     def linearize_arc_pure(start, end, center, cw):
         nonlocal total_time_min, current_feed, line_no
-
         cx, cy = center["X"], center["Y"]
         z      = start["Z"]
         r      = math.hypot(start["X"] - cx, start["Y"] - cy)
         a0     = math.atan2(start["Y"] - cy, start["X"] - cx)
         a1     = math.atan2(end["Y"]   - cy, end["X"]   - cx)
-
         if cw:
             if a1 >= a0: a1 -= 2 * math.pi
         else:
             if a1 <= a0: a1 += 2 * math.pi
-
         arc_len = abs(a1 - a0) * r
         steps   = max(1, int(arc_len / ARC_RESOLUTION))
         da      = (a1 - a0) / steps
-
-        lines = []
-        px, py = start["X"], start["Y"]
-
+        lines   = []
+        px, py  = start["X"], start["Y"]
         for i in range(1, steps + 1):
             a  = a0 + da * i
             tx = cx + r * math.cos(a)
@@ -431,20 +449,16 @@ def convert_file(input_path, output_path, log_fn,
             if current_feed:
                 total_time_min += math.hypot(tx - px, ty - py) / current_feed
             px, py = tx, ty
-
         pos = {"X": px, "Y": py, "Z": z}
         fp  = end.copy()
         if abs(fp["X"] - pos["X"]) > 0.001 or abs(fp["Y"] - pos["Y"]) > 0.001:
-            lines.append(nline() +
-                         f"G1 X{fp['X']:.3f} Y{fp['Y']:.3f} Z{fp['Z']:.3f}")
+            lines.append(nline() + f"G1 X{fp['X']:.3f} Y{fp['Y']:.3f} Z{fp['Z']:.3f}")
             if current_feed:
                 total_time_min += math.hypot(fp["X"] - pos["X"],
                                              fp["Y"] - pos["Y"]) / current_feed
             pos = fp
-
         return pos, lines
 
-    # ── choose handler ────────────────────────────────────────────────────────
     if use_arc_commands:
         handle_arc = arc_to_g2g3
     elif _NUMPY:
@@ -452,7 +466,6 @@ def convert_file(input_path, output_path, log_fn,
     else:
         handle_arc = linearize_arc_pure
 
-    # ── first pass: count lines ───────────────────────────────────────────────
     try:
         with open(input_path, "r", encoding="utf-8", errors="replace") as f:
             total_lines = sum(
@@ -470,7 +483,6 @@ def convert_file(input_path, output_path, log_fn,
     if progress_callback:
         progress_callback(0, "Reading file…")
 
-    # ── open output ───────────────────────────────────────────────────────────
     try:
         out_f = open(output_path, "w", encoding="utf-8", buffering=256 * 1024)
     except Exception as e:
@@ -479,7 +491,6 @@ def convert_file(input_path, output_path, log_fn,
     def emit(line):
         out_f.write(line + "\n")
 
-    # ── main loop ─────────────────────────────────────────────────────────────
     try:
         emit(nline() + "G21")
         emit(nline() + "G17")
@@ -490,21 +501,17 @@ def convert_file(input_path, output_path, log_fn,
 
         with open(input_path, "r", encoding="utf-8", errors="replace") as in_f:
             lines_processed = 0
-
             for raw in in_f:
                 line = raw.strip()
                 if not line or line.startswith(";"):
                     continue
-
                 lines_processed += 1
-
                 if progress_callback and (
                     lines_processed % 100 == 0 or lines_processed == total_lines
                 ):
                     pct = (lines_processed / total_lines) * 95
-                    progress_callback(
-                        pct, f"Processing line {lines_processed}/{total_lines}"
-                    )
+                    progress_callback(pct,
+                        f"Processing line {lines_processed}/{total_lines}")
 
                 try:
                     if line.startswith("SPINDLE CW"):
@@ -524,12 +531,10 @@ def convert_file(input_path, output_path, log_fn,
                             if k in c:
                                 cmd += f" {k}{target[k]:.3f}"
                         emit(nline() + cmd)
-
                         d = math.sqrt(sum((target[k] - last_pos[k]) ** 2
                                          for k in "XYZ"))
                         if d > 0:
                             total_time_min += d / RAPID_FEED
-
                         last_pos = target
 
                     elif line.startswith("MOVEABS"):
@@ -566,26 +571,20 @@ def convert_file(input_path, output_path, log_fn,
                             current_feed = DEFAULT_FEED
                             emit(nline() + f"F{current_feed:.0f}")
                             log_fn(f"Warning: No VEL found, using default F{current_feed:.0f}")
-
                         c  = parse_coord(line, axes=("X", "Y", "Z"))
                         ij = parse_coord(line, axes=("I", "J"))
-
                         end = last_pos.copy()
                         end.update(c)
-
-                        # FIX v1.92: ISEL I/J are ABSOLUTE coordinates,
-                        # not offsets from current position.
+                        # FIX v1.92: I/J are absolute coordinates in ISEL
                         center = {
                             "X": ij.get("I", 0.0),
                             "Y": ij.get("J", 0.0),
                         }
-
                         r_check = math.hypot(last_pos["X"] - center["X"],
                                              last_pos["Y"] - center["Y"])
                         if r_check < 1e-6:
                             log_fn(f"Warning: zero-radius arc skipped on line [{line}]")
                             continue
-
                         new_pos, arc_lines = handle_arc(last_pos, end, center, cw)
                         for al in arc_lines:
                             emit(al)
@@ -637,8 +636,7 @@ def run_gui():
         root.update_idletasks()
 
     def drop(event):
-        if converting:
-            return
+        if converting: return
         path = event.data.strip("{}")
         if os.path.isfile(path):
             input_var.set(path)
@@ -647,8 +645,7 @@ def run_gui():
             log(f"Error: Not a valid file: {path}")
 
     def browse_input():
-        if converting:
-            return
+        if converting: return
         path = filedialog.askopenfilename(filetypes=[("All Files", "*.*")])
         if path:
             input_var.set(path)
@@ -684,7 +681,6 @@ def run_gui():
                     f"Conversion finished!\nMode: {mode_str}\n\n"
                     f"Estimated time: {m} min {s} sec"
                 )
-                # ── auto-open preview ─────────────────────────────────────
                 open_preview(root, out_path)
 
             root.after(0, on_done)
@@ -704,8 +700,7 @@ def run_gui():
 
     def convert():
         nonlocal converting
-        if converting:
-            return
+        if converting: return
         if not input_var.get():
             messagebox.showerror("Error", "No input file selected")
             return
@@ -713,15 +708,13 @@ def run_gui():
         if not os.path.isfile(in_path):
             messagebox.showerror("Error", f"File not found: {in_path}")
             return
-
         base     = os.path.splitext(os.path.basename(in_path))[0]
         out_path = filedialog.asksaveasfilename(
             defaultextension=".ngc",
             initialfile=base + ".ngc",
             filetypes=[("G-code Files", "*.ngc"), ("All Files", "*.*")]
         )
-        if not out_path:
-            return
+        if not out_path: return
 
         arc_mode   = use_arc_var.get()
         converting = True
@@ -729,7 +722,6 @@ def run_gui():
         browse_btn.config(state="disabled")
         progress_bar["value"] = 0
         progress_label.config(text="Starting conversion...")
-
         logbox.delete(1.0, tk.END)
         log("Starting conversion...")
         log(f"Input:   {in_path}")
@@ -749,7 +741,6 @@ def run_gui():
         ).start()
 
     # ── layout ────────────────────────────────────────────────────────────────
-
     tk.Label(root, text="ISEL File", bg=BG, fg=FG,
              font=("Arial", 10)).pack(pady=5)
 
@@ -761,50 +752,41 @@ def run_gui():
     btn_frame = tk.Frame(root, bg=BG)
     btn_frame.pack(pady=10)
 
-    browse_btn = tk.Button(
-        btn_frame, text="Browse", command=browse_input,
-        bg=BTN, fg=FG, width=12
-    )
+    browse_btn = tk.Button(btn_frame, text="Browse", command=browse_input,
+                           bg=BTN, fg=FG, width=12)
     browse_btn.pack(side=tk.LEFT, padx=5)
 
-    convert_btn = tk.Button(
-        btn_frame, text="Convert", command=convert,
-        bg="#3a7afe", fg="white", width=12, font=("Arial", 10, "bold")
-    )
+    convert_btn = tk.Button(btn_frame, text="Convert", command=convert,
+                            bg="#3a7afe", fg="white", width=12,
+                            font=("Arial", 10, "bold"))
     convert_btn.pack(side=tk.LEFT, padx=5)
 
-    numpy_text  = "⚡ numpy detected – arc linearisation accelerated" if _NUMPY \
-                  else "⚠ numpy not found – pip install numpy"
+    numpy_text  = ("⚡ numpy detected – arc linearisation accelerated"
+                   if _NUMPY else "⚠ numpy not found – pip install numpy")
     numpy_color = "#00ff88" if _NUMPY else "#ffaa00"
     tk.Label(root, text=numpy_text, bg=BG, fg=numpy_color,
              font=("Arial", 8)).pack(pady=(0, 2))
 
     arc_frame = tk.Frame(root, bg=BG)
     arc_frame.pack(pady=(2, 8))
-
     tk.Checkbutton(
         arc_frame,
         text="Use G2/G3 arc commands  (smaller file, requires arc-capable controller)",
-        variable=use_arc_var,
-        bg=BG, fg=FG, selectcolor=BTN,
-        activebackground=BG, activeforeground=FG,
-        font=("Arial", 9),
+        variable=use_arc_var, bg=BG, fg=FG, selectcolor=BTN,
+        activebackground=BG, activeforeground=FG, font=("Arial", 9),
     ).pack()
 
     progress_frame = tk.Frame(root, bg=BG)
     progress_frame.pack(pady=5, padx=10, fill=tk.X)
 
-    progress_label = tk.Label(
-        progress_frame, text="Ready", bg=BG, fg=FG, font=("Arial", 9)
-    )
+    progress_label = tk.Label(progress_frame, text="Ready", bg=BG, fg=FG,
+                               font=("Arial", 9))
     progress_label.pack()
 
     style = ttk.Style()
     style.theme_use("default")
-    style.configure(
-        "custom.Horizontal.TProgressbar",
-        troughcolor=BTN, background="#3a7afe", thickness=20
-    )
+    style.configure("custom.Horizontal.TProgressbar",
+                    troughcolor=BTN, background="#3a7afe", thickness=20)
     progress_bar = ttk.Progressbar(
         progress_frame, style="custom.Horizontal.TProgressbar",
         orient="horizontal", mode="determinate", length=490
@@ -814,9 +796,8 @@ def run_gui():
     tk.Label(root, text="Conversion Log", bg=BG, fg=FG,
              font=("Arial", 9)).pack(pady=(5, 2))
 
-    logbox = tk.Text(
-        root, height=10, bg="#121212", fg="#00ff88", font=("Consolas", 9)
-    )
+    logbox = tk.Text(root, height=10, bg="#121212", fg="#00ff88",
+                     font=("Consolas", 9))
     logbox.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
     log("ISEL to G-code Converter Ready")
