@@ -28,7 +28,7 @@ RAPID_FEED     = 3000.0
 
 # ── arc fitting constants (G1 → G2/G3 detection) ─────────────────────────────
 # Minimum diameter for a full-circle arc to be converted to G2/G3
-ARC_FIT_MIN_DIAMETER  = 10.0    # mm — circles smaller than this stay as G1
+ARC_FIT_MIN_DIAMETER  = 5.0    # mm — circles smaller than this stay as G1
 # How much each point is allowed to deviate from the fitted circle center
 ARC_FIT_RADIUS_TOL    = 0.05    # mm — tighter = stricter circle detection
 # A full circle must span at least this many degrees (360 = only full circles)
