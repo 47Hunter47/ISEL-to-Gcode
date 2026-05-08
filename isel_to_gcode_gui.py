@@ -1,7 +1,7 @@
 try:
     from version import APP_VERSION
 except ImportError:
-    APP_VERSION = "1.96"
+    APP_VERSION = "1.97"
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -27,7 +27,7 @@ DEFAULT_FEED   = 1000.0
 RAPID_FEED     = 3000.0
 
 # ── arc fitting constants (G1 → G2/G3 detection) ─────────────────────────────
-ARC_FIT_MIN_DIAMETER  = 6.0
+ARC_FIT_MIN_DIAMETER  = 5.0
 ARC_FIT_RADIUS_TOL    = 0.05
 ARC_FIT_MIN_ARC_DEG   = 355.0
 ARC_FIT_MIN_POINTS    = 8
@@ -529,32 +529,42 @@ def convert_file(input_path, output_path, log_fn,
             total_time_min += arc_len / current_feed
         r_signed = r if span <= math.pi else -r
         code  = "G2" if cw else "G3"
-        gline = nline() + f"{code} X{end['X']:.4f} Y{end['Y']:.4f} R{r_signed:.4f}"
+        gline = nline() + f"{code} X{end['X']:.3f} Y{end['Y']:.3f} R{r_signed:.3f}"
         return end.copy(), [gline]
 
     def fitted_arc_to_g2g3(start_pos, end_pos, cx, cy, radius, cw):
         """
-        Full circle detected by arc fitting.
-        Emit two 180-degree arcs to avoid 'current point same as end point' error.
-        Logosol rejects G2/G3 where start == end.
-        Arc 1: start → diametrically opposite midpoint  (R positive, span=180)
-        Arc 2: midpoint → start                         (R positive, span=180)
+        Full circle → two 180-degree arcs.
+        Avoids Logosol errors:
+          - 'current point same as end point': start != end in each arc
+          - 'arc radius too small': ISEL integer coords cause ~0.003mm drift,
+            making chord > 2*fitted_radius. Fix: use chord/2 as R per arc.
+        Arc 1: start → midpoint (diametrically opposite)
+        Arc 2: midpoint → start
         """
         nonlocal total_time_min, current_feed
         arc_len = 2.0 * math.pi * radius
         if current_feed:
             total_time_min += arc_len / current_feed
 
-        # Midpoint = point diametrically opposite to start on the circle
+        # Midpoint = diametrically opposite to start on the fitted circle
         a_start = math.atan2(start_pos["Y"] - cy, start_pos["X"] - cx)
         a_mid   = a_start + math.pi
         mx = cx + radius * math.cos(a_mid)
         my = cy + radius * math.sin(a_mid)
 
+        # R = chord/2 + tiny epsilon so controller never sees chord > 2*R.
+        # ISEL integer rounding causes ~0.003mm drift; adding 0.001mm prevents
+        # the 'arc radius too small to reach end point' alarm.
+        chord = math.hypot(mx - start_pos["X"], my - start_pos["Y"])
+        r1 = chord / 2.0 + 0.001
+        r2 = r1  # symmetric — both chords are identical
+
         code  = "G2" if cw else "G3"
-        line1 = nline() + f"{code} X{mx:.4f} Y{my:.4f} R{radius:.4f}"
-        line2 = nline() + f"{code} X{start_pos['X']:.4f} Y{start_pos['Y']:.4f} R{radius:.4f}"
+        line1 = nline() + f"{code} X{mx:.3f} Y{my:.3f} R{r1:.3f}"
+        line2 = nline() + f"{code} X{start_pos['X']:.3f} Y{start_pos['Y']:.3f} R{r2:.3f}"
         return end_pos.copy(), [line1, line2]
+
 
     def emit_g1_buffer(buffer_pts, buf_start_pos):
         nonlocal total_time_min, current_feed
@@ -703,7 +713,7 @@ def convert_file(input_path, output_path, log_fn,
                 last_pos = new_pos
                 arc_fit_converted += 1
                 log_fn(f"  Arc fit: full circle \u00f8{radius*2:.2f}mm \u2192 "
-                       f"{'G2' if cw else 'G3'} R{radius:.4f} (two semicircles)")
+                       f"{'G2' if cw else 'G3'} R{radius:.3f} (two semicircles)")
                 moveabs_buffer.clear()
                 return
 
