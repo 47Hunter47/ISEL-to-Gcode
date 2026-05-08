@@ -1,7 +1,7 @@
 try:
     from version import APP_VERSION
 except ImportError:
-    APP_VERSION = "1.95"
+    APP_VERSION = "1.96"
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -26,6 +26,16 @@ ARC_RESOLUTION = 0.05
 DEFAULT_FEED   = 1000.0
 RAPID_FEED     = 3000.0
 
+# ── arc fitting constants (G1 → G2/G3 detection) ─────────────────────────────
+# Minimum diameter for a full-circle arc to be converted to G2/G3
+ARC_FIT_MIN_DIAMETER  = 10.0    # mm — circles smaller than this stay as G1
+# How much each point is allowed to deviate from the fitted circle center
+ARC_FIT_RADIUS_TOL    = 0.05    # mm — tighter = stricter circle detection
+# A full circle must span at least this many degrees (360 = only full circles)
+ARC_FIT_MIN_ARC_DEG   = 355.0   # degrees — allows tiny floating-point gap at start/end
+# Minimum number of G1 segments needed to consider arc fitting
+ARC_FIT_MIN_POINTS    = 8       # fewer segments = likely not a circle
+
 # ── UI colors ─────────────────────────────────────────────────────────────────
 BG  = "#1e1e1e"
 FG  = "#ffffff"
@@ -37,6 +47,164 @@ COLOR_RAPID = "#ff4444"
 COLOR_BG    = "#121212"
 COLOR_GRID  = "#2a2a2a"
 COLOR_AXIS  = "#3a3a3a"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  ARC FITTING — detect full circles in a sequence of G1 points
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fit_circle_to_points(pts):
+    """
+    Fit a circle to a list of (x, y) points using the algebraic method.
+    Returns (cx, cy, radius) or None if fitting fails.
+
+    This is a numerically stable least-squares approach — does not need numpy.
+    Works by solving the linear system derived from x²+y²+Dx+Ey+F=0.
+    """
+    n = len(pts)
+    if n < 3:
+        return None
+
+    # Build the matrix and vector for the least-squares system
+    sum_x  = sum(p[0] for p in pts)
+    sum_y  = sum(p[1] for p in pts)
+    sum_x2 = sum(p[0]**2 for p in pts)
+    sum_y2 = sum(p[1]**2 for p in pts)
+    sum_xy = sum(p[0]*p[1] for p in pts)
+    sum_x3 = sum(p[0]**3 for p in pts)
+    sum_y3 = sum(p[1]**3 for p in pts)
+    sum_xy2 = sum(p[0]*p[1]**2 for p in pts)
+    sum_x2y = sum(p[0]**2*p[1] for p in pts)
+
+    # Solve 3x3 linear system using Cramer's rule
+    # [ sum_x2  sum_xy  sum_x ] [D]   [ -(sum_x3 + sum_xy2) ]
+    # [ sum_xy  sum_y2  sum_y ] [E] = [ -(sum_x2y + sum_y3) ]
+    # [ sum_x   sum_y   n     ] [F]   [ -(sum_x2 + sum_y2)  ]
+
+    a11, a12, a13 = sum_x2, sum_xy, sum_x
+    a21, a22, a23 = sum_xy, sum_y2, sum_y
+    a31, a32, a33 = sum_x,  sum_y,  float(n)
+
+    b1 = -(sum_x3 + sum_xy2)
+    b2 = -(sum_x2y + sum_y3)
+    b3 = -(sum_x2 + sum_y2)
+
+    det = (a11*(a22*a33 - a23*a32)
+           - a12*(a21*a33 - a23*a31)
+           + a13*(a21*a32 - a22*a31))
+
+    if abs(det) < 1e-12:
+        return None  # degenerate / collinear points
+
+    D = ((b1*(a22*a33 - a23*a32)
+          - a12*(b2*a33 - a23*b3)
+          + a13*(b2*a32 - a22*b3)) / det)
+
+    E = ((a11*(b2*a33 - a23*b3)
+          - b1*(a21*a33 - a23*a31)
+          + a13*(a21*b3 - b2*a31)) / det)
+
+    F = ((a11*(a22*b3 - b2*a32)
+          - a12*(a21*b3 - b2*a31)
+          + b1*(a21*a32 - a22*a31)) / det)
+
+    cx = -D / 2.0
+    cy = -E / 2.0
+    r2 = cx**2 + cy**2 - F
+    if r2 <= 0:
+        return None
+
+    return cx, cy, math.sqrt(r2)
+
+
+def try_arc_fit(buffer_pts, start_pos):
+    """
+    Try to detect a full circle in buffer_pts (list of (x, y) positions).
+    start_pos is the position before the first buffer point.
+
+    Returns (cx, cy, radius, cw) if a valid full circle is found,
+    or None if the points do not form a full circle.
+
+    Rules enforced here:
+    - Minimum ARC_FIT_MIN_POINTS segments
+    - All points within ARC_FIT_RADIUS_TOL of the fitted center
+    - Arc span must be >= ARC_FIT_MIN_ARC_DEG (full circle check)
+    - Diameter must be >= ARC_FIT_MIN_DIAMETER
+    - Z must not change (no helical moves)
+    """
+    if len(buffer_pts) < ARC_FIT_MIN_POINTS:
+        return None
+
+    # Check Z is constant — no helical arcs
+    z_vals = [p[2] for p in buffer_pts]
+    if max(z_vals) - min(z_vals) > 1e-4:
+        return None
+
+    xy_pts = [(p[0], p[1]) for p in buffer_pts]
+
+    # Include the start position in the fit for better accuracy
+    all_pts = [(start_pos["X"], start_pos["Y"])] + xy_pts
+
+    result = fit_circle_to_points(all_pts)
+    if result is None:
+        return None
+
+    cx, cy, radius = result
+
+    # Check minimum diameter
+    if radius * 2.0 < ARC_FIT_MIN_DIAMETER:
+        return None
+
+    # Check that every point lies on the circle within tolerance
+    for x, y in all_pts:
+        dist = math.hypot(x - cx, y - cy)
+        if abs(dist - radius) > ARC_FIT_RADIUS_TOL:
+            return None
+
+    # Compute total arc span by summing angular steps between consecutive points
+    all_xy = [(start_pos["X"], start_pos["Y"])] + xy_pts
+    angles = [math.atan2(p[1] - cy, p[0] - cx) for p in all_xy]
+
+    # Determine dominant direction (CW or CCW) from cross products
+    cw_votes = 0
+    ccw_votes = 0
+    for i in range(1, len(all_xy) - 1):
+        ax = all_xy[i][0] - all_xy[i-1][0]
+        ay = all_xy[i][1] - all_xy[i-1][1]
+        bx = all_xy[i+1][0] - all_xy[i][0]
+        by = all_xy[i+1][1] - all_xy[i][1]
+        cross = ax * by - ay * bx
+        if cross < 0:
+            cw_votes += 1
+        else:
+            ccw_votes += 1
+
+    cw = cw_votes > ccw_votes
+
+    # Sum angular steps in the dominant direction
+    total_angle = 0.0
+    for i in range(1, len(angles)):
+        da = angles[i] - angles[i-1]
+        # Normalize to [-pi, pi]
+        while da > math.pi:
+            da -= 2 * math.pi
+        while da < -math.pi:
+            da += 2 * math.pi
+        # CW = negative da; CCW = positive da
+        if cw:
+            if da > 0:
+                da -= 2 * math.pi
+        else:
+            if da < 0:
+                da += 2 * math.pi
+        total_angle += abs(da)
+
+    total_deg = math.degrees(total_angle)
+
+    if total_deg < ARC_FIT_MIN_ARC_DEG:
+        return None  # not a full circle — could be half-circle or corner radius
+
+    return cx, cy, radius, cw
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -308,10 +476,14 @@ def open_preview(parent, gcode_path):
 def convert_file(input_path, output_path, log_fn,
                  progress_callback=None, use_arc_commands=False):
 
-    total_time_min = 0.0
-    current_feed   = None
-    last_pos       = {"X": 0.0, "Y": 0.0, "Z": 0.0}
-    line_no        = 1
+    total_time_min  = 0.0
+    current_feed    = None
+    last_pos        = {"X": 0.0, "Y": 0.0, "Z": 0.0}
+    line_no         = 1
+
+    # Counters for arc fitting results (logged at end)
+    arc_fit_converted = 0
+    arc_fit_skipped   = 0
 
     def nline():
         nonlocal line_no
@@ -328,6 +500,7 @@ def convert_file(input_path, output_path, log_fn,
         return coords
 
     def arc_to_g2g3(start, end, center, cw):
+        """Convert a known arc (from CWABS/CCWABS) to a single G2/G3 R-format line."""
         nonlocal total_time_min, current_feed
         cx, cy = center["X"], center["Y"]
         r  = math.hypot(start["X"] - cx, start["Y"] - cy)
@@ -345,6 +518,52 @@ def convert_file(input_path, output_path, log_fn,
         code  = "G2" if cw else "G3"
         gline = nline() + f"{code} X{end['X']:.4f} Y{end['Y']:.4f} R{r_signed:.4f}"
         return end.copy(), [gline]
+
+    def fitted_arc_to_g2g3(start_pos, end_pos, cx, cy, radius, cw):
+        """
+        Emit a single G2/G3 line for a full-circle detected by arc fitting.
+        For a full circle, end point = start point (G2/G3 full circle syntax).
+        R is negative because span > 180° (full circle = 360°).
+        """
+        nonlocal total_time_min, current_feed
+        arc_len = 2.0 * math.pi * radius
+        if current_feed:
+            total_time_min += arc_len / current_feed
+        # Full circle: R must be negative (span > 180°)
+        r_signed = -radius
+        code  = "G2" if cw else "G3"
+        # End = start for full circle
+        gline = nline() + (f"{code} X{start_pos['X']:.4f} Y{start_pos['Y']:.4f}"
+                           f" R{r_signed:.4f}")
+        return end_pos.copy(), [gline]
+
+    def emit_g1_buffer(buffer_pts, buf_start_pos):
+        """
+        Flush buffered MOVEABS points as regular G1 lines.
+        Called when arc fitting fails or is not attempted.
+        """
+        nonlocal total_time_min, current_feed
+        lines = []
+        prev  = buf_start_pos
+        for pt in buffer_pts:
+            cmd = "G1"
+            # Only emit axes that changed to keep output clean
+            if abs(pt["X"] - prev.get("X", 0)) > 1e-6:
+                cmd += f" X{pt['X']:.3f}"
+            if abs(pt["Y"] - prev.get("Y", 0)) > 1e-6:
+                cmd += f" Y{pt['Y']:.3f}"
+            if abs(pt["Z"] - prev.get("Z", 0)) > 1e-6:
+                cmd += f" Z{pt['Z']:.3f}"
+            if cmd == "G1":
+                # No axes changed — skip duplicate point
+                prev = pt
+                continue
+            lines.append(nline() + cmd)
+            d = math.sqrt(sum((pt[k] - prev[k]) ** 2 for k in "XYZ"))
+            if current_feed and d > 0:
+                total_time_min += d / current_feed
+            prev = pt
+        return lines
 
     def linearize_arc_numpy(start, end, center, cw):
         nonlocal total_time_min, current_feed, line_no
@@ -416,6 +635,7 @@ def convert_file(input_path, output_path, log_fn,
             pos = fp
         return pos, lines
 
+    # Select arc handler for CWABS/CCWABS lines
     if use_arc_commands:
         handle_arc = arc_to_g2g3
     elif _NUMPY:
@@ -423,6 +643,7 @@ def convert_file(input_path, output_path, log_fn,
     else:
         handle_arc = linearize_arc_pure
 
+    # ── count lines ───────────────────────────────────────────────────────────
     try:
         with open(input_path, "r", encoding="utf-8", errors="replace") as f:
             total_lines = sum(
@@ -448,6 +669,55 @@ def convert_file(input_path, output_path, log_fn,
     def emit(line):
         out_f.write(line + "\n")
 
+    # ── MOVEABS arc-fitting buffer ─────────────────────────────────────────────
+    # When use_arc_commands=True, consecutive MOVEABS lines are buffered here
+    # instead of being written immediately. When a non-MOVEABS command arrives
+    # (or at end of file), the buffer is flushed: either as a single G2/G3 if
+    # a full circle is detected, or as normal G1 lines otherwise.
+    moveabs_buffer   = []      # list of {"X", "Y", "Z"} dicts
+    buffer_start_pos = None    # last_pos snapshot before buffer started
+
+    def flush_moveabs_buffer():
+        """
+        Try arc fitting on the accumulated buffer.
+        If a full circle is found → emit G2/G3.
+        Otherwise → emit G1 lines.
+        Returns (new_last_pos, lines_written_count)
+        """
+        nonlocal arc_fit_converted, arc_fit_skipped, last_pos
+
+        if not moveabs_buffer:
+            return
+
+        if use_arc_commands and len(moveabs_buffer) >= ARC_FIT_MIN_POINTS:
+            # Attempt arc fitting
+            xy_pts = [(p["X"], p["Y"], p["Z"]) for p in moveabs_buffer]
+            fit    = try_arc_fit(xy_pts, buffer_start_pos)
+            if fit is not None:
+                cx, cy, radius, cw = fit
+                end_pos = moveabs_buffer[-1]
+                new_pos, arc_lines = fitted_arc_to_g2g3(
+                    buffer_start_pos, end_pos, cx, cy, radius, cw
+                )
+                for al in arc_lines:
+                    emit(al)
+                last_pos = new_pos
+                arc_fit_converted += 1
+                log_fn(f"  Arc fit: full circle ⌀{radius*2:.2f}mm → "
+                       f"{'G2' if cw else 'G3'} R{radius:.4f}")
+                moveabs_buffer.clear()
+                return
+
+        # Arc fitting not attempted or failed → flush as G1
+        g1_lines = emit_g1_buffer(moveabs_buffer, buffer_start_pos)
+        for gl in g1_lines:
+            emit(gl)
+        if moveabs_buffer:
+            last_pos = moveabs_buffer[-1]
+        if use_arc_commands and len(moveabs_buffer) >= ARC_FIT_MIN_POINTS:
+            arc_fit_skipped += 1
+        moveabs_buffer.clear()
+
     try:
         emit(nline() + "G21")
         emit(nline() + "G17")
@@ -472,6 +742,8 @@ def convert_file(input_path, output_path, log_fn,
 
                 try:
                     if line.startswith("SPINDLE CW"):
+                        # Non-MOVEABS command → flush buffer first
+                        flush_moveabs_buffer()
                         m = re.search(r"RPM(\d+)", line)
                         if m:
                             emit(nline() + f"S{int(m.group(1))} M03")
@@ -480,6 +752,8 @@ def convert_file(input_path, output_path, log_fn,
                             log_fn(f"Warning: Could not parse RPM from: {line}")
 
                     elif line.startswith("FASTABS"):
+                        # Non-MOVEABS command → flush buffer first
+                        flush_moveabs_buffer()
                         c      = parse_coord(line)
                         target = last_pos.copy()
                         target.update(c)
@@ -502,18 +776,31 @@ def convert_file(input_path, output_path, log_fn,
                             current_feed = DEFAULT_FEED
                             emit(nline() + f"F{current_feed:.0f}")
                             log_fn(f"Warning: No VEL found, using default F{current_feed:.0f}")
-                        cmd = "G1"
-                        for k in ("X", "Y", "Z"):
-                            if k in c:
-                                cmd += f" {k}{target[k]:.3f}"
-                        emit(nline() + cmd)
-                        if current_feed:
-                            d = math.sqrt(sum((target[k] - last_pos[k]) ** 2
-                                             for k in "XYZ"))
-                            total_time_min += d / current_feed
-                        last_pos = target
+
+                        if use_arc_commands:
+                            # Buffer the point — don't emit yet
+                            if not moveabs_buffer:
+                                # Snapshot the position before the buffer starts
+                                buffer_start_pos = last_pos.copy()
+                            moveabs_buffer.append(target.copy())
+                            # Update last_pos so subsequent lines have correct reference
+                            last_pos = target
+                        else:
+                            # Normal G1 mode — emit immediately
+                            cmd = "G1"
+                            for k in ("X", "Y", "Z"):
+                                if k in c:
+                                    cmd += f" {k}{target[k]:.3f}"
+                            emit(nline() + cmd)
+                            if current_feed:
+                                d = math.sqrt(sum((target[k] - last_pos[k]) ** 2
+                                                 for k in "XYZ"))
+                                total_time_min += d / current_feed
+                            last_pos = target
 
                     elif line.startswith("VEL"):
+                        # Non-MOVEABS command → flush buffer first
+                        flush_moveabs_buffer()
                         m = re.search(r"VEL\s*(\d+(?:\.\d+)?)", line)
                         if m:
                             current_feed = float(m.group(1)) / VEL_RATIO
@@ -523,6 +810,8 @@ def convert_file(input_path, output_path, log_fn,
                             log_fn(f"Warning: Could not parse VEL from: {line}")
 
                     elif line.startswith("CWABS") or line.startswith("CCWABS"):
+                        # Non-MOVEABS command → flush buffer first
+                        flush_moveabs_buffer()
                         cw = line.startswith("CWABS")
                         if current_feed is None:
                             current_feed = DEFAULT_FEED
@@ -532,7 +821,7 @@ def convert_file(input_path, output_path, log_fn,
                         ij = parse_coord(line, axes=("I", "J"))
                         end = last_pos.copy()
                         end.update(c)
-                        # FIX v1.92: I/J are absolute coordinates in ISEL
+                        # I/J are absolute coordinates in ISEL (not offsets)
                         center = {
                             "X": ij.get("I", 0.0),
                             "Y": ij.get("J", 0.0),
@@ -551,6 +840,9 @@ def convert_file(input_path, output_path, log_fn,
                     log_fn(f"Warning: Error on line [{line}]: {e}")
                     continue
 
+            # End of file — flush any remaining MOVEABS buffer
+            flush_moveabs_buffer()
+
         emit(nline() + "M05")
         emit(nline() + "M30")
 
@@ -559,6 +851,11 @@ def convert_file(input_path, output_path, log_fn,
 
     if progress_callback:
         progress_callback(100, "Complete!")
+
+    # Log arc fitting summary if arc mode was active
+    if use_arc_commands and (arc_fit_converted > 0 or arc_fit_skipped > 0):
+        log_fn(f"Arc fitting summary: {arc_fit_converted} circle(s) converted to G2/G3, "
+               f"{arc_fit_skipped} segment group(s) left as G1")
 
     return total_time_min
 
@@ -693,7 +990,7 @@ def run_gui():
         log(f"Input:   {in_path}")
         log(f"Output:  {out_path}")
         if arc_mode:
-            log("Mode:    G2/G3 arc commands (R format)")
+            log("Mode:    G2/G3 arc commands + full-circle detection (R format)")
         elif _NUMPY:
             log("Mode:    G1 linearised  (numpy accelerated)")
         else:
