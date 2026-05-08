@@ -27,14 +27,10 @@ DEFAULT_FEED   = 1000.0
 RAPID_FEED     = 3000.0
 
 # ── arc fitting constants (G1 → G2/G3 detection) ─────────────────────────────
-# Minimum diameter for a full-circle arc to be converted to G2/G3
-ARC_FIT_MIN_DIAMETER  = 6.0     # mm — circles smaller than this stay as G1
-# How much each point is allowed to deviate from the fitted circle center
-ARC_FIT_RADIUS_TOL    = 0.05    # mm — tighter = stricter circle detection
-# A full circle must span at least this many degrees (360 = only full circles)
-ARC_FIT_MIN_ARC_DEG   = 355.0   # degrees — allows tiny floating-point gap at start/end
-# Minimum number of G1 segments needed to consider arc fitting
-ARC_FIT_MIN_POINTS    = 8       # fewer segments = likely not a circle
+ARC_FIT_MIN_DIAMETER  = 6.0
+ARC_FIT_RADIUS_TOL    = 0.05
+ARC_FIT_MIN_ARC_DEG   = 355.0
+ARC_FIT_MIN_POINTS    = 8
 
 # ── UI colors ─────────────────────────────────────────────────────────────────
 BG  = "#1e1e1e"
@@ -44,185 +40,185 @@ BTN = "#2d2d2d"
 # ── preview colors ────────────────────────────────────────────────────────────
 COLOR_CUT   = "#00c8ff"
 COLOR_RAPID = "#ff4444"
+COLOR_ARC   = "#00ff88"
 COLOR_BG    = "#121212"
 COLOR_GRID  = "#2a2a2a"
 COLOR_AXIS  = "#3a3a3a"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  ARC FITTING — detect full circles in a sequence of G1 points
+#  ARC FITTING
 # ─────────────────────────────────────────────────────────────────────────────
 
 def fit_circle_to_points(pts):
-    """
-    Fit a circle to a list of (x, y) points using the algebraic method.
-    Returns (cx, cy, radius) or None if fitting fails.
-
-    This is a numerically stable least-squares approach — does not need numpy.
-    Works by solving the linear system derived from x²+y²+Dx+Ey+F=0.
-    """
     n = len(pts)
     if n < 3:
         return None
-
-    # Build the matrix and vector for the least-squares system
-    sum_x  = sum(p[0] for p in pts)
-    sum_y  = sum(p[1] for p in pts)
-    sum_x2 = sum(p[0]**2 for p in pts)
-    sum_y2 = sum(p[1]**2 for p in pts)
-    sum_xy = sum(p[0]*p[1] for p in pts)
-    sum_x3 = sum(p[0]**3 for p in pts)
-    sum_y3 = sum(p[1]**3 for p in pts)
+    sum_x   = sum(p[0] for p in pts)
+    sum_y   = sum(p[1] for p in pts)
+    sum_x2  = sum(p[0]**2 for p in pts)
+    sum_y2  = sum(p[1]**2 for p in pts)
+    sum_xy  = sum(p[0]*p[1] for p in pts)
+    sum_x3  = sum(p[0]**3 for p in pts)
+    sum_y3  = sum(p[1]**3 for p in pts)
     sum_xy2 = sum(p[0]*p[1]**2 for p in pts)
     sum_x2y = sum(p[0]**2*p[1] for p in pts)
-
-    # Solve 3x3 linear system using Cramer's rule
-    # [ sum_x2  sum_xy  sum_x ] [D]   [ -(sum_x3 + sum_xy2) ]
-    # [ sum_xy  sum_y2  sum_y ] [E] = [ -(sum_x2y + sum_y3) ]
-    # [ sum_x   sum_y   n     ] [F]   [ -(sum_x2 + sum_y2)  ]
-
     a11, a12, a13 = sum_x2, sum_xy, sum_x
     a21, a22, a23 = sum_xy, sum_y2, sum_y
     a31, a32, a33 = sum_x,  sum_y,  float(n)
-
     b1 = -(sum_x3 + sum_xy2)
     b2 = -(sum_x2y + sum_y3)
     b3 = -(sum_x2 + sum_y2)
-
     det = (a11*(a22*a33 - a23*a32)
            - a12*(a21*a33 - a23*a31)
            + a13*(a21*a32 - a22*a31))
-
     if abs(det) < 1e-12:
-        return None  # degenerate / collinear points
-
-    D = ((b1*(a22*a33 - a23*a32)
-          - a12*(b2*a33 - a23*b3)
-          + a13*(b2*a32 - a22*b3)) / det)
-
-    E = ((a11*(b2*a33 - a23*b3)
-          - b1*(a21*a33 - a23*a31)
-          + a13*(a21*b3 - b2*a31)) / det)
-
-    F = ((a11*(a22*b3 - b2*a32)
-          - a12*(a21*b3 - b2*a31)
-          + b1*(a21*a32 - a22*a31)) / det)
-
+        return None
+    D = ((b1*(a22*a33 - a23*a32) - a12*(b2*a33 - a23*b3) + a13*(b2*a32 - a22*b3)) / det)
+    E = ((a11*(b2*a33 - a23*b3) - b1*(a21*a33 - a23*a31) + a13*(a21*b3 - b2*a31)) / det)
+    F = ((a11*(a22*b3 - b2*a32) - a12*(a21*b3 - b2*a31) + b1*(a21*a32 - a22*a31)) / det)
     cx = -D / 2.0
     cy = -E / 2.0
     r2 = cx**2 + cy**2 - F
     if r2 <= 0:
         return None
-
     return cx, cy, math.sqrt(r2)
 
 
 def try_arc_fit(buffer_pts, start_pos):
-    """
-    Try to detect a full circle in buffer_pts (list of (x, y) positions).
-    start_pos is the position before the first buffer point.
-
-    Returns (cx, cy, radius, cw) if a valid full circle is found,
-    or None if the points do not form a full circle.
-
-    Rules enforced here:
-    - Minimum ARC_FIT_MIN_POINTS segments
-    - All points within ARC_FIT_RADIUS_TOL of the fitted center
-    - Arc span must be >= ARC_FIT_MIN_ARC_DEG (full circle check)
-    - Diameter must be >= ARC_FIT_MIN_DIAMETER
-    - Z must not change (no helical moves)
-    """
     if len(buffer_pts) < ARC_FIT_MIN_POINTS:
         return None
-
-    # Check Z is constant — no helical arcs
     z_vals = [p[2] for p in buffer_pts]
     if max(z_vals) - min(z_vals) > 1e-4:
         return None
-
-    xy_pts = [(p[0], p[1]) for p in buffer_pts]
-
-    # Include the start position in the fit for better accuracy
+    xy_pts  = [(p[0], p[1]) for p in buffer_pts]
     all_pts = [(start_pos["X"], start_pos["Y"])] + xy_pts
-
-    result = fit_circle_to_points(all_pts)
+    result  = fit_circle_to_points(all_pts)
     if result is None:
         return None
-
     cx, cy, radius = result
-
-    # Check minimum diameter
     if radius * 2.0 < ARC_FIT_MIN_DIAMETER:
         return None
-
-    # Check that every point lies on the circle within tolerance
     for x, y in all_pts:
-        dist = math.hypot(x - cx, y - cy)
-        if abs(dist - radius) > ARC_FIT_RADIUS_TOL:
+        if abs(math.hypot(x - cx, y - cy) - radius) > ARC_FIT_RADIUS_TOL:
             return None
-
-    # Compute total arc span by summing angular steps between consecutive points
-    all_xy = [(start_pos["X"], start_pos["Y"])] + xy_pts
-    angles = [math.atan2(p[1] - cy, p[0] - cx) for p in all_xy]
-
-    # Determine dominant direction (CW or CCW) from cross products
-    cw_votes = 0
-    ccw_votes = 0
+    all_xy   = [(start_pos["X"], start_pos["Y"])] + xy_pts
+    angles   = [math.atan2(p[1] - cy, p[0] - cx) for p in all_xy]
+    cw_votes = ccw_votes = 0
     for i in range(1, len(all_xy) - 1):
-        ax = all_xy[i][0] - all_xy[i-1][0]
-        ay = all_xy[i][1] - all_xy[i-1][1]
-        bx = all_xy[i+1][0] - all_xy[i][0]
-        by = all_xy[i+1][1] - all_xy[i][1]
+        ax = all_xy[i][0] - all_xy[i-1][0]; ay = all_xy[i][1] - all_xy[i-1][1]
+        bx = all_xy[i+1][0] - all_xy[i][0]; by = all_xy[i+1][1] - all_xy[i][1]
         cross = ax * by - ay * bx
-        if cross < 0:
-            cw_votes += 1
-        else:
-            ccw_votes += 1
-
+        if cross < 0: cw_votes  += 1
+        else:         ccw_votes += 1
     cw = cw_votes > ccw_votes
-
-    # Sum angular steps in the dominant direction
     total_angle = 0.0
     for i in range(1, len(angles)):
         da = angles[i] - angles[i-1]
-        # Normalize to [-pi, pi]
-        while da > math.pi:
-            da -= 2 * math.pi
-        while da < -math.pi:
-            da += 2 * math.pi
-        # CW = negative da; CCW = positive da
+        while da >  math.pi: da -= 2 * math.pi
+        while da < -math.pi: da += 2 * math.pi
         if cw:
-            if da > 0:
-                da -= 2 * math.pi
+            if da > 0: da -= 2 * math.pi
         else:
-            if da < 0:
-                da += 2 * math.pi
+            if da < 0: da += 2 * math.pi
         total_angle += abs(da)
-
-    total_deg = math.degrees(total_angle)
-
-    if total_deg < ARC_FIT_MIN_ARC_DEG:
-        return None  # not a full circle — could be half-circle or corner radius
-
+    if math.degrees(total_angle) < ARC_FIT_MIN_ARC_DEG:
+        return None
     return cx, cy, radius, cw
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  PREVIEW WINDOW
+#  PREVIEW — approximates G2/G3 arcs into line segments for display
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _arc_to_polyline(x0, y0, x1, y1, r_signed, is_g2, steps=36):
+    """
+    Convert a G2/G3 R-format arc to a list of (x, y) waypoints for preview.
+    x0,y0 = start; x1,y1 = end; r_signed = R value from G-code.
+    Returns list of (x, y) including start and end.
+    """
+    r = abs(r_signed)
+    if r < 1e-9:
+        return [(x0, y0), (x1, y1)]
+
+    dx = x1 - x0
+    dy = y1 - y0
+    d  = math.hypot(dx, dy)
+    if d < 1e-9:
+        # Full circle — build circle around midpoint, but we don't have center.
+        # This shouldn't happen with two-semicircle output, but guard anyway.
+        return [(x0, y0), (x1, y1)]
+
+    # Mid-chord point
+    mx = (x0 + x1) / 2.0
+    my = (y0 + y1) / 2.0
+
+    # Distance from chord midpoint to circle center
+    h2 = r * r - (d / 2.0) ** 2
+    if h2 < 0:
+        h2 = 0.0
+    h = math.sqrt(h2)
+
+    # Perpendicular unit vector
+    px = -dy / d
+    py =  dx / d
+
+    # Two candidate centers
+    cx1 = mx + h * px
+    cy1 = my + h * py
+    cx2 = mx - h * px
+    cy2 = my - h * py
+
+    # Choose center based on R sign and arc direction:
+    # R > 0 → minor arc (< 180°), R < 0 → major arc (> 180°)
+    # For G2 (CW): center is to the right of travel direction
+    # For G3 (CCW): center is to the left of travel direction
+    # Cross product of (start→end) × (start→center) determines side
+    def cross_sign(cx, cy):
+        return (dx * (cy - y0) - dy * (cx - x0))
+
+    c1_cross = cross_sign(cx1, cy1)
+    # G2=CW: center should be on left side of travel (cross > 0)
+    # G3=CCW: center should be on right side (cross < 0)
+    if is_g2:
+        cx = cx1 if c1_cross > 0 else cx2
+        cy = cy1 if c1_cross > 0 else cy2
+    else:
+        cx = cx1 if c1_cross < 0 else cx2
+        cy = cy1 if c1_cross < 0 else cy2
+
+    # If R < 0, use the other center (major arc)
+    if r_signed < 0:
+        cx = cx2 if cx == cx1 else cx1
+        cy = cy2 if cy == cy1 else cy1
+
+    a0 = math.atan2(y0 - cy, x0 - cx)
+    a1 = math.atan2(y1 - cy, x1 - cx)
+
+    if is_g2:  # CW: decreasing angle
+        if a1 >= a0: a1 -= 2 * math.pi
+    else:       # CCW: increasing angle
+        if a1 <= a0: a1 += 2 * math.pi
+
+    pts = []
+    for i in range(steps + 1):
+        t = i / steps
+        a = a0 + (a1 - a0) * t
+        pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+    return pts
+
 
 def open_preview(parent, gcode_path):
     """
     Parse output G-code and draw toolpath on a canvas.
-    - Segments grouped into polylines per move type for speed
-    - Toggle between 2D top-down and isometric projection
-    - Pan: left-click drag  |  Zoom: mouse wheel  |  Fit: button
+    G2/G3 arcs are approximated into polylines for display.
+    Pan: left-click drag | Zoom: mouse wheel | Fit: button
     """
 
     # ── parse G-code ──────────────────────────────────────────────────────────
-    points = []   # (x, y, z, is_rapid)
+    points   = []   # (x, y, z, move_type)  move_type: 'rapid'|'cut'|'arc'
     cx, cy, cz = 0.0, 0.0, 0.0
-    is_rapid   = False
+    move_type  = "rapid"
 
     try:
         with open(gcode_path, "r", encoding="utf-8", errors="replace") as f:
@@ -230,22 +226,42 @@ def open_preview(parent, gcode_path):
                 ln = re.sub(r"^N\d+\s*", "", raw.strip())
                 if not ln:
                     continue
-                if ln.startswith("G0"):
-                    is_rapid = True
-                elif re.match(r"G[123]\b", ln):
-                    is_rapid = False
-                else:
+
+                is_g0 = ln.startswith("G0")
+                is_g1 = ln.startswith("G1")
+                is_g2 = ln.startswith("G2")
+                is_g3 = ln.startswith("G3")
+
+                if not (is_g0 or is_g1 or is_g2 or is_g3):
                     continue
+
                 xm = re.search(r"X(-?\d+(?:\.\d+)?)", ln)
                 ym = re.search(r"Y(-?\d+(?:\.\d+)?)", ln)
                 zm = re.search(r"Z(-?\d+(?:\.\d+)?)", ln)
+                rm = re.search(r"R(-?\d+(?:\.\d+)?)", ln)
+
                 nx = float(xm.group(1)) if xm else cx
                 ny = float(ym.group(1)) if ym else cy
                 nz = float(zm.group(1)) if zm else cz
-                points.append((cx, cy, cz, is_rapid))
+                r_val = float(rm.group(1)) if rm else None
+
+                if is_g0:
+                    points.append((cx, cy, cz, "rapid"))
+                    points.append((nx, ny, nz, "rapid"))
+                elif is_g1:
+                    points.append((cx, cy, cz, "cut"))
+                    points.append((nx, ny, nz, "cut"))
+                elif (is_g2 or is_g3) and r_val is not None:
+                    # Expand arc into polyline segments
+                    arc_pts = _arc_to_polyline(cx, cy, nx, ny, r_val, is_g2)
+                    for ax, ay in arc_pts:
+                        points.append((ax, ay, cz, "arc"))
+                else:
+                    points.append((cx, cy, cz, "cut"))
+                    points.append((nx, ny, nz, "cut"))
+
                 cx, cy, cz = nx, ny, nz
-        if points:
-            points.append((cx, cy, cz, is_rapid))
+
     except Exception as e:
         messagebox.showerror("Preview Error", f"Could not read G-code:\n{e}",
                              parent=parent)
@@ -260,9 +276,9 @@ def open_preview(parent, gcode_path):
     def build_groups(pts):
         groups = []
         cur    = None
-        for x, y, z, rapid in pts:
-            if cur is None or cur["rapid"] != rapid:
-                cur = {"rapid": rapid, "pts": []}
+        for x, y, z, mt in pts:
+            if cur is None or cur["type"] != mt:
+                cur = {"type": mt, "pts": []}
                 groups.append(cur)
             cur["pts"].append((x, y, z))
         return groups
@@ -276,8 +292,9 @@ def open_preview(parent, gcode_path):
     span_x = max_x - min_x or 1.0
     span_y = max_y - min_y or 1.0
 
-    cut_count   = sum(1 for p in points if not p[3])
-    rapid_count = sum(1 for p in points if p[3])
+    cut_count   = sum(1 for p in points if p[3] == "cut")
+    rapid_count = sum(1 for p in points if p[3] == "rapid")
+    arc_count   = sum(1 for p in points if p[3] == "arc")
 
     # ── window ────────────────────────────────────────────────────────────────
     win = tk.Toplevel(parent)
@@ -298,23 +315,25 @@ def open_preview(parent, gcode_path):
     tk.Label(toolbar, text="Cut", bg=BTN, fg=FG,
              font=("Consolas", 9)).pack(side=tk.LEFT)
 
+    tk.Label(toolbar, text="━━", bg=BTN, fg=COLOR_ARC,
+             font=("Consolas", 11)).pack(side=tk.LEFT, padx=(10, 2))
+    tk.Label(toolbar, text="Arc", bg=BTN, fg=FG,
+             font=("Consolas", 9)).pack(side=tk.LEFT)
+
     tk.Label(toolbar, text="━━", bg=BTN, fg=COLOR_RAPID,
-             font=("Consolas", 11)).pack(side=tk.LEFT, padx=(12, 2))
+             font=("Consolas", 11)).pack(side=tk.LEFT, padx=(10, 2))
     tk.Label(toolbar, text="Rapid", bg=BTN, fg=FG,
              font=("Consolas", 9)).pack(side=tk.LEFT)
 
-    stats = (f"   {cut_count:,} cut  {rapid_count:,} rapid"
+    stats = (f"   {cut_count:,} cut  {arc_count:,} arc  {rapid_count:,} rapid"
              f"   W:{span_x:.1f}  H:{span_y:.1f} mm")
     tk.Label(toolbar, text=stats, bg=BTN, fg="#777777",
              font=("Consolas", 9)).pack(side=tk.LEFT, padx=6)
 
     iso_var = tk.BooleanVar(value=False)
 
-    def toggle_iso():
-        fit_view()
-
     iso_chk = tk.Checkbutton(
-        toolbar, text="Isometric", variable=iso_var, command=toggle_iso,
+        toolbar, text="Isometric", variable=iso_var, command=lambda: fit_view(),
         bg=BTN, fg=FG, selectcolor="#3a7afe",
         activebackground=BTN, activeforeground=FG, font=("Consolas", 9)
     )
@@ -328,7 +347,6 @@ def open_preview(parent, gcode_path):
     canvas = tk.Canvas(win, bg=COLOR_BG, highlightthickness=0)
     canvas.pack(fill=tk.BOTH, expand=True)
 
-    # ── view state ────────────────────────────────────────────────────────────
     view = {"ox": 0.0, "oy": 0.0, "scale": 1.0}
     drag = {"x": 0, "y": 0, "active": False}
     PADDING   = 48
@@ -361,7 +379,6 @@ def open_preview(parent, gcode_path):
         if cw < 2 or ch < 2:
             return
 
-        # grid (2D only)
         if not iso_var.get():
             s = view["scale"]
             raw_step  = 50.0 / s
@@ -377,8 +394,7 @@ def open_preview(parent, gcode_path):
                 if 0 <= px <= cw:
                     canvas.create_line(px, 0, px, ch, fill=COLOR_GRID, width=1)
                     canvas.create_text(px + 2, ch - 12, text=f"{gx:.0f}",
-                                       fill="#4a4a4a", font=("Consolas", 7),
-                                       anchor="w")
+                                       fill="#4a4a4a", font=("Consolas", 7), anchor="w")
                 gx += grid_step
             gy = math.floor(min_y / grid_step) * grid_step
             while gy <= max_y + grid_step:
@@ -386,19 +402,20 @@ def open_preview(parent, gcode_path):
                 if 0 <= py <= ch:
                     canvas.create_line(0, py, cw, py, fill=COLOR_GRID, width=1)
                     canvas.create_text(4, py - 2, text=f"{gy:.0f}",
-                                       fill="#4a4a4a", font=("Consolas", 7),
-                                       anchor="sw")
+                                       fill="#4a4a4a", font=("Consolas", 7), anchor="sw")
                 gy += grid_step
             ox_px, oy_px = project(0, 0, 0)
             canvas.create_line(ox_px, 0, ox_px, ch, fill=COLOR_AXIS, width=1)
             canvas.create_line(0, oy_px, cw, oy_px, fill=COLOR_AXIS, width=1)
 
-        # draw: rapid behind, cut on top
-        for pass_rapid in (True, False):
-            color = COLOR_RAPID if pass_rapid else COLOR_CUT
-            dash  = (4, 4) if pass_rapid else None
+        # Draw order: rapid → cut → arc (arc on top so circles are visible)
+        draw_order = [("rapid", COLOR_RAPID, (4, 4)),
+                      ("cut",   COLOR_CUT,   None),
+                      ("arc",   COLOR_ARC,   None)]
+
+        for mt, color, dash in draw_order:
             for grp in raw_groups:
-                if grp["rapid"] != pass_rapid:
+                if grp["type"] != mt:
                     continue
                 pts = grp["pts"]
                 if len(pts) < 2:
@@ -409,8 +426,7 @@ def open_preview(parent, gcode_path):
                     flat.extend((px, py))
                 xs = flat[0::2]
                 ys = flat[1::2]
-                if (min(xs) > cw or max(xs) < 0 or
-                        min(ys) > ch or max(ys) < 0):
+                if min(xs) > cw or max(xs) < 0 or min(ys) > ch or max(ys) < 0:
                     continue
                 if dash:
                     canvas.create_line(*flat, fill=color, width=1, dash=dash)
@@ -480,8 +496,6 @@ def convert_file(input_path, output_path, log_fn,
     current_feed    = None
     last_pos        = {"X": 0.0, "Y": 0.0, "Z": 0.0}
     line_no         = 1
-
-    # Counters for arc fitting results (logged at end)
     arc_fit_converted = 0
     arc_fit_skipped   = 0
 
@@ -500,7 +514,6 @@ def convert_file(input_path, output_path, log_fn,
         return coords
 
     def arc_to_g2g3(start, end, center, cw):
-        """Convert a known arc (from CWABS/CCWABS) to a single G2/G3 R-format line."""
         nonlocal total_time_min, current_feed
         cx, cy = center["X"], center["Y"]
         r  = math.hypot(start["X"] - cx, start["Y"] - cy)
@@ -521,33 +534,34 @@ def convert_file(input_path, output_path, log_fn,
 
     def fitted_arc_to_g2g3(start_pos, end_pos, cx, cy, radius, cw):
         """
-        Emit a single G2/G3 line for a full-circle detected by arc fitting.
-        For a full circle, end point = start point (G2/G3 full circle syntax).
-        R is negative because span > 180° (full circle = 360°).
+        Full circle detected by arc fitting.
+        Emit two 180-degree arcs to avoid 'current point same as end point' error.
+        Logosol rejects G2/G3 where start == end.
+        Arc 1: start → diametrically opposite midpoint  (R positive, span=180)
+        Arc 2: midpoint → start                         (R positive, span=180)
         """
         nonlocal total_time_min, current_feed
         arc_len = 2.0 * math.pi * radius
         if current_feed:
             total_time_min += arc_len / current_feed
-        # Full circle: R must be negative (span > 180°)
-        r_signed = -radius
+
+        # Midpoint = point diametrically opposite to start on the circle
+        a_start = math.atan2(start_pos["Y"] - cy, start_pos["X"] - cx)
+        a_mid   = a_start + math.pi
+        mx = cx + radius * math.cos(a_mid)
+        my = cy + radius * math.sin(a_mid)
+
         code  = "G2" if cw else "G3"
-        # End = start for full circle
-        gline = nline() + (f"{code} X{start_pos['X']:.4f} Y{start_pos['Y']:.4f}"
-                           f" R{r_signed:.4f}")
-        return end_pos.copy(), [gline]
+        line1 = nline() + f"{code} X{mx:.4f} Y{my:.4f} R{radius:.4f}"
+        line2 = nline() + f"{code} X{start_pos['X']:.4f} Y{start_pos['Y']:.4f} R{radius:.4f}"
+        return end_pos.copy(), [line1, line2]
 
     def emit_g1_buffer(buffer_pts, buf_start_pos):
-        """
-        Flush buffered MOVEABS points as regular G1 lines.
-        Called when arc fitting fails or is not attempted.
-        """
         nonlocal total_time_min, current_feed
         lines = []
         prev  = buf_start_pos
         for pt in buffer_pts:
             cmd = "G1"
-            # Only emit axes that changed to keep output clean
             if abs(pt["X"] - prev.get("X", 0)) > 1e-6:
                 cmd += f" X{pt['X']:.3f}"
             if abs(pt["Y"] - prev.get("Y", 0)) > 1e-6:
@@ -555,7 +569,6 @@ def convert_file(input_path, output_path, log_fn,
             if abs(pt["Z"] - prev.get("Z", 0)) > 1e-6:
                 cmd += f" Z{pt['Z']:.3f}"
             if cmd == "G1":
-                # No axes changed — skip duplicate point
                 prev = pt
                 continue
             lines.append(nline() + cmd)
@@ -635,7 +648,6 @@ def convert_file(input_path, output_path, log_fn,
             pos = fp
         return pos, lines
 
-    # Select arc handler for CWABS/CCWABS lines
     if use_arc_commands:
         handle_arc = arc_to_g2g3
     elif _NUMPY:
@@ -643,7 +655,6 @@ def convert_file(input_path, output_path, log_fn,
     else:
         handle_arc = linearize_arc_pure
 
-    # ── count lines ───────────────────────────────────────────────────────────
     try:
         with open(input_path, "r", encoding="utf-8", errors="replace") as f:
             total_lines = sum(
@@ -669,28 +680,16 @@ def convert_file(input_path, output_path, log_fn,
     def emit(line):
         out_f.write(line + "\n")
 
-    # ── MOVEABS arc-fitting buffer ─────────────────────────────────────────────
-    # When use_arc_commands=True, consecutive MOVEABS lines are buffered here
-    # instead of being written immediately. When a non-MOVEABS command arrives
-    # (or at end of file), the buffer is flushed: either as a single G2/G3 if
-    # a full circle is detected, or as normal G1 lines otherwise.
-    moveabs_buffer   = []      # list of {"X", "Y", "Z"} dicts
-    buffer_start_pos = None    # last_pos snapshot before buffer started
+    moveabs_buffer   = []
+    buffer_start_pos = None
 
     def flush_moveabs_buffer():
-        """
-        Try arc fitting on the accumulated buffer.
-        If a full circle is found → emit G2/G3.
-        Otherwise → emit G1 lines.
-        Returns (new_last_pos, lines_written_count)
-        """
         nonlocal arc_fit_converted, arc_fit_skipped, last_pos
 
         if not moveabs_buffer:
             return
 
         if use_arc_commands and len(moveabs_buffer) >= ARC_FIT_MIN_POINTS:
-            # Attempt arc fitting
             xy_pts = [(p["X"], p["Y"], p["Z"]) for p in moveabs_buffer]
             fit    = try_arc_fit(xy_pts, buffer_start_pos)
             if fit is not None:
@@ -703,12 +702,11 @@ def convert_file(input_path, output_path, log_fn,
                     emit(al)
                 last_pos = new_pos
                 arc_fit_converted += 1
-                log_fn(f"  Arc fit: full circle ⌀{radius*2:.2f}mm → "
-                       f"{'G2' if cw else 'G3'} R{-radius:.4f}")
+                log_fn(f"  Arc fit: full circle \u00f8{radius*2:.2f}mm \u2192 "
+                       f"{'G2' if cw else 'G3'} R{radius:.4f} (two semicircles)")
                 moveabs_buffer.clear()
                 return
 
-        # Arc fitting not attempted or failed → flush as G1
         g1_lines = emit_g1_buffer(moveabs_buffer, buffer_start_pos)
         for gl in g1_lines:
             emit(gl)
@@ -742,7 +740,6 @@ def convert_file(input_path, output_path, log_fn,
 
                 try:
                     if line.startswith("SPINDLE CW"):
-                        # Non-MOVEABS command → flush buffer first
                         flush_moveabs_buffer()
                         m = re.search(r"RPM(\d+)", line)
                         if m:
@@ -752,7 +749,6 @@ def convert_file(input_path, output_path, log_fn,
                             log_fn(f"Warning: Could not parse RPM from: {line}")
 
                     elif line.startswith("FASTABS"):
-                        # Non-MOVEABS command → flush buffer first
                         flush_moveabs_buffer()
                         c      = parse_coord(line)
                         target = last_pos.copy()
@@ -777,21 +773,14 @@ def convert_file(input_path, output_path, log_fn,
                             emit(nline() + f"F{current_feed:.0f}")
                             log_fn(f"Warning: No VEL found, using default F{current_feed:.0f}")
 
-                        # Pure-Z moves (no XY) are never part of a circle —
-                        # flush buffer first, then emit G1 immediately
                         has_xy = "X" in c or "Y" in c
 
                         if use_arc_commands and has_xy:
-                            # XY move in arc mode — buffer for circle detection
                             if not moveabs_buffer:
-                                # Snapshot position before buffer starts
                                 buffer_start_pos = last_pos.copy()
                             moveabs_buffer.append(target.copy())
-                            # Keep last_pos current so next line has correct reference
                             last_pos = target
                         else:
-                            # Pure-Z move (or arc mode off):
-                            # flush any pending XY buffer, then write G1 immediately
                             if use_arc_commands:
                                 flush_moveabs_buffer()
                             cmd = "G1"
@@ -806,7 +795,6 @@ def convert_file(input_path, output_path, log_fn,
                             last_pos = target
 
                     elif line.startswith("VEL"):
-                        # Non-MOVEABS command → flush buffer first
                         flush_moveabs_buffer()
                         m = re.search(r"VEL\s*(\d+(?:\.\d+)?)", line)
                         if m:
@@ -817,7 +805,6 @@ def convert_file(input_path, output_path, log_fn,
                             log_fn(f"Warning: Could not parse VEL from: {line}")
 
                     elif line.startswith("CWABS") or line.startswith("CCWABS"):
-                        # Non-MOVEABS command → flush buffer first
                         flush_moveabs_buffer()
                         cw = line.startswith("CWABS")
                         if current_feed is None:
@@ -828,7 +815,6 @@ def convert_file(input_path, output_path, log_fn,
                         ij = parse_coord(line, axes=("I", "J"))
                         end = last_pos.copy()
                         end.update(c)
-                        # I/J are absolute coordinates in ISEL (not offsets)
                         center = {
                             "X": ij.get("I", 0.0),
                             "Y": ij.get("J", 0.0),
@@ -847,7 +833,6 @@ def convert_file(input_path, output_path, log_fn,
                     log_fn(f"Warning: Error on line [{line}]: {e}")
                     continue
 
-            # End of file — flush any remaining MOVEABS buffer
             flush_moveabs_buffer()
 
         emit(nline() + "M05")
@@ -859,7 +844,6 @@ def convert_file(input_path, output_path, log_fn,
     if progress_callback:
         progress_callback(100, "Complete!")
 
-    # Log arc fitting summary if arc mode was active
     if use_arc_commands and (arc_fit_converted > 0 or arc_fit_skipped > 0):
         log_fn(f"Arc fitting summary: {arc_fit_converted} circle(s) converted to G2/G3, "
                f"{arc_fit_skipped} segment group(s) left as G1")
@@ -873,14 +857,14 @@ def convert_file(input_path, output_path, log_fn,
 
 def run_gui():
     root = TkinterDnD.Tk()
-    root.title(f"ISEL → G-code Converter v{APP_VERSION}")
+    root.title(f"ISEL \u2192 G-code Converter v{APP_VERSION}")
     root.geometry("520x520")
     root.configure(bg=BG)
 
     input_var    = tk.StringVar()
     use_arc_var  = tk.BooleanVar(value=False)
     converting   = False
-    last_output  = {"path": None}   # path of last successfully converted file
+    last_output  = {"path": None}
 
     try:
         root.iconbitmap("icon.ico")
@@ -939,12 +923,11 @@ def run_gui():
 
             def on_done():
                 last_output["path"] = out_path
-                preview_btn.config(state="normal")   # enable preview button
-
+                preview_btn.config(state="normal")
                 log("-" * 50)
-                log(f"✓ Conversion completed  ({mode_str})")
-                log(f"⏱ Estimated program time: {m} min {s} sec")
-                log("⚠ Program time may change according to machine parameters")
+                log(f"\u2713 Conversion completed  ({mode_str})")
+                log(f"\u23f1 Estimated program time: {m} min {s} sec")
+                log("\u26a0 Program time may change according to machine parameters")
                 progress_label.config(text="Conversion complete!")
                 messagebox.showinfo(
                     "Completed",
@@ -955,7 +938,7 @@ def run_gui():
             root.after(0, on_done)
 
         except Exception as e:
-            root.after(0, lambda: log(f"✗ Error: {e}"))
+            root.after(0, lambda: log(f"\u2717 Error: {e}"))
             root.after(0, lambda: progress_label.config(text="Error occurred"))
             root.after(0, lambda: messagebox.showerror("Error", str(e)))
 
@@ -987,7 +970,7 @@ def run_gui():
 
         arc_mode   = use_arc_var.get()
         converting = True
-        preview_btn.config(state="disabled")         # reset preview until done
+        preview_btn.config(state="disabled")
         convert_btn.config(state="disabled", text="Converting...")
         browse_btn.config(state="disabled")
         progress_bar["value"] = 0
@@ -1031,14 +1014,13 @@ def run_gui():
                             font=("Arial", 10, "bold"))
     convert_btn.pack(side=tk.LEFT, padx=5)
 
-    # Preview button — disabled until a successful conversion exists
     preview_btn = tk.Button(btn_frame, text="Preview", command=show_preview,
                             bg="#2a6a2a", fg="white", width=12,
                             font=("Arial", 10, "bold"), state="disabled")
     preview_btn.pack(side=tk.LEFT, padx=5)
 
-    numpy_text  = ("⚡ numpy detected – arc linearisation accelerated"
-                   if _NUMPY else "⚠ numpy not found – pip install numpy")
+    numpy_text  = ("\u26a1 numpy detected \u2013 arc linearisation accelerated"
+                   if _NUMPY else "\u26a0 numpy not found \u2013 pip install numpy")
     numpy_color = "#00ff88" if _NUMPY else "#ffaa00"
     tk.Label(root, text=numpy_text, bg=BG, fg=numpy_color,
              font=("Arial", 8)).pack(pady=(0, 2))
