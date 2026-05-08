@@ -28,7 +28,7 @@ RAPID_FEED     = 3000.0
 
 # ── arc fitting constants (G1 → G2/G3 detection) ─────────────────────────────
 # Minimum diameter for a full-circle arc to be converted to G2/G3
-ARC_FIT_MIN_DIAMETER  = 5.0    # mm — circles smaller than this stay as G1
+ARC_FIT_MIN_DIAMETER  = 6.0     # mm — circles smaller than this stay as G1
 # How much each point is allowed to deviate from the fitted circle center
 ARC_FIT_RADIUS_TOL    = 0.05    # mm — tighter = stricter circle detection
 # A full circle must span at least this many degrees (360 = only full circles)
@@ -704,7 +704,7 @@ def convert_file(input_path, output_path, log_fn,
                 last_pos = new_pos
                 arc_fit_converted += 1
                 log_fn(f"  Arc fit: full circle ⌀{radius*2:.2f}mm → "
-                       f"{'G2' if cw else 'G3'} R{radius:.4f}")
+                       f"{'G2' if cw else 'G3'} R{-radius:.4f}")
                 moveabs_buffer.clear()
                 return
 
@@ -777,16 +777,23 @@ def convert_file(input_path, output_path, log_fn,
                             emit(nline() + f"F{current_feed:.0f}")
                             log_fn(f"Warning: No VEL found, using default F{current_feed:.0f}")
 
-                        if use_arc_commands:
-                            # Buffer the point — don't emit yet
+                        # Pure-Z moves (no XY) are never part of a circle —
+                        # flush buffer first, then emit G1 immediately
+                        has_xy = "X" in c or "Y" in c
+
+                        if use_arc_commands and has_xy:
+                            # XY move in arc mode — buffer for circle detection
                             if not moveabs_buffer:
-                                # Snapshot the position before the buffer starts
+                                # Snapshot position before buffer starts
                                 buffer_start_pos = last_pos.copy()
                             moveabs_buffer.append(target.copy())
-                            # Update last_pos so subsequent lines have correct reference
+                            # Keep last_pos current so next line has correct reference
                             last_pos = target
                         else:
-                            # Normal G1 mode — emit immediately
+                            # Pure-Z move (or arc mode off):
+                            # flush any pending XY buffer, then write G1 immediately
+                            if use_arc_commands:
+                                flush_moveabs_buffer()
                             cmd = "G1"
                             for k in ("X", "Y", "Z"):
                                 if k in c:
