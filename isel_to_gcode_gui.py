@@ -529,7 +529,8 @@ def convert_file(input_path, output_path, log_fn,
             total_time_min += arc_len / current_feed
         r_signed = r if span <= math.pi else -r
         code  = "G2" if cw else "G3"
-        gline = nline() + f"{code} X{end['X']:.3f} Y{end['Y']:.3f} R{r_signed:.3f}"
+        f_str = f" F{current_feed:.0f}" if current_feed else ""
+        gline = nline() + f"{code} X{end['X']:.3f} Y{end['Y']:.3f} R{r_signed:.3f}{f_str}"
         return end.copy(), [gline]
 
     def fitted_arc_to_g2g3(start_pos, end_pos, cx, cy, radius, cw):
@@ -561,8 +562,9 @@ def convert_file(input_path, output_path, log_fn,
         r2 = r1  # symmetric — both chords are identical
 
         code  = "G2" if cw else "G3"
-        line1 = nline() + f"{code} X{mx:.3f} Y{my:.3f} R{r1:.3f}"
-        line2 = nline() + f"{code} X{start_pos['X']:.3f} Y{start_pos['Y']:.3f} R{r2:.3f}"
+        f_str = f" F{current_feed:.0f}" if current_feed else ""
+        line1 = nline() + f"{code} X{mx:.3f} Y{my:.3f} R{r1:.3f}{f_str}"
+        line2 = nline() + f"{code} X{start_pos['X']:.3f} Y{start_pos['Y']:.3f} R{r2:.3f}{f_str}"
         return end_pos.copy(), [line1, line2]
 
 
