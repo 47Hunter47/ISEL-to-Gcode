@@ -30,7 +30,7 @@ jobs:
       - name: Compress EXE with UPX
         run: |
           choco install upx -y
-          upx --best dist/ISEL_to_Gcode.exe
+          upx --best --force dist/ISEL_to_Gcode.exe
 
       - name: Upload EXE
         uses: actions/upload-artifact@v6
