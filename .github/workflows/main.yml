@@ -27,11 +27,6 @@ jobs:
         run: |
           pyinstaller --onefile --windowed --icon=icon.ico --collect-all tkinterdnd2 --hidden-import=numpy --name ISEL_to_Gcode isel_to_gcode_gui.py
 
-      - name: Compress EXE with UPX
-        run: |
-          choco install upx -y
-          upx --best --force dist/ISEL_to_Gcode.exe
-
       - name: Upload EXE
         uses: actions/upload-artifact@v6
         with:
