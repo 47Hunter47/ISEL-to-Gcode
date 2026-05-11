@@ -1,18 +1,14 @@
 name: Build Windows EXE
-
 on:
   push:
     branches:
       - main
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
   build:
     runs-on: windows-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v5
@@ -30,6 +26,11 @@ jobs:
       - name: Build EXE
         run: |
           pyinstaller --onefile --windowed --icon=icon.ico --collect-all tkinterdnd2 --hidden-import=numpy --name ISEL_to_Gcode isel_to_gcode_gui.py
+
+      - name: Compress EXE with UPX
+        run: |
+          choco install upx -y
+          upx --best dist/ISEL_to_Gcode.exe
 
       - name: Upload EXE
         uses: actions/upload-artifact@v6
