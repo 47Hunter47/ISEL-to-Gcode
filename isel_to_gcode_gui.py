@@ -27,7 +27,7 @@ DEFAULT_FEED   = 1000.0
 RAPID_FEED     = 3000.0
 
 # ── arc fitting constants (G1 → G2/G3 detection) ─────────────────────────────
-ARC_FIT_MIN_DIAMETER  = 6.0
+ARC_FIT_MIN_DIAMETER  = 5.0
 ARC_FIT_RADIUS_TOL    = 0.05
 ARC_FIT_MIN_ARC_DEG   = 355.0
 ARC_FIT_MIN_POINTS    = 8
@@ -529,12 +529,10 @@ def convert_file(input_path, output_path, log_fn,
             total_time_min += arc_len / current_feed
         r_signed = r if span <= math.pi else -r
         code  = "G2" if cw else "G3"
-        lines = []
-        # Emit F on its own line before arc — most reliable way to set feed
-        if current_feed:
-            lines.append(nline() + f"F{current_feed:.0f}")
-        lines.append(nline() + f"{code} X{end['X']:.3f} Y{end['Y']:.3f} R{r_signed:.3f}")
-        return end.copy(), lines
+        # F on the same line as G2/G3 — Logosol manual format (Appendix C, p.16)
+        f_str = f" F{current_feed:.0f}" if current_feed else ""
+        gline = nline() + f"{code} X{end['X']:.3f} Y{end['Y']:.3f} R{r_signed:.3f}{f_str}"
+        return end.copy(), [gline]
 
     def fitted_arc_to_g2g3(start_pos, end_pos, cx, cy, radius, cw):
         """
@@ -565,13 +563,12 @@ def convert_file(input_path, output_path, log_fn,
         r2 = r1  # symmetric — both chords are identical
 
         code  = "G2" if cw else "G3"
+        # F on the same line as G2/G3 — Logosol manual format (Appendix C, p.16)
+        # Example from manual: G2 X50 Y0 R50 F250
+        f_str = f" F{current_feed:.0f}" if current_feed else ""
         lines = []
-        # Emit F on its own line before arcs — most reliable way to set feed
-        # Some controllers ignore F when on the same line as G2/G3
-        if current_feed:
-            lines.append(nline() + f"F{current_feed:.0f}")
-        lines.append(nline() + f"{code} X{mx:.3f} Y{my:.3f} R{r1:.3f}")
-        lines.append(nline() + f"{code} X{start_pos['X']:.3f} Y{start_pos['Y']:.3f} R{r2:.3f}")
+        lines.append(nline() + f"{code} X{mx:.3f} Y{my:.3f} R{r1:.3f}{f_str}")
+        lines.append(nline() + f"{code} X{start_pos['X']:.3f} Y{start_pos['Y']:.3f} R{r2:.3f}{f_str}")
         return end_pos.copy(), lines
 
 
