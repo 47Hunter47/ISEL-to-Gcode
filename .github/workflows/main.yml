@@ -1,8 +1,7 @@
 name: Build Windows EXE
 on:
-  push:
-    branches:
-      - main
+  release:
+    types: [published]
   workflow_dispatch:
 permissions:
   contents: read
