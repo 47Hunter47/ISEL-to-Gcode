@@ -32,3 +32,4 @@ jobs:
         with:
           name: ISEL_to_Gcode_EXE
           path: dist/ISEL_to_Gcode.exe
+          retention-days: 7
