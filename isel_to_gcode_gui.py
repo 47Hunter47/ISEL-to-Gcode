@@ -1,7 +1,7 @@
 try:
     from version import APP_VERSION
 except ImportError:
-    APP_VERSION = "1.98"
+    APP_VERSION = "1.99"
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -498,6 +498,16 @@ def convert_file(input_path, output_path, log_fn,
     line_no         = 1
     arc_fit_converted = 0
     arc_fit_skipped   = 0
+    # First spindle command is held back so it is emitted AFTER the first
+    # Z safe retract (G0 Z...) instead of before it.
+    pending_spindle = None
+
+    def flush_spindle():
+        """Emit the held spindle line (if any) at the current position."""
+        nonlocal pending_spindle
+        if pending_spindle is not None:
+            emit(nline() + pending_spindle)
+            pending_spindle = None
 
     def nline():
         nonlocal line_no
@@ -759,8 +769,15 @@ def convert_file(input_path, output_path, log_fn,
                         flush_moveabs_buffer()
                         m = re.search(r"RPM(\d+)", line)
                         if m:
-                            emit(nline() + f"S{int(m.group(1))} M03")
-                            log_fn(f"Spindle: {m.group(1)} RPM")
+                            if pending_spindle is None:
+                                # Hold the first spindle command; it will be
+                                # emitted right after the first Z safe retract.
+                                pending_spindle = f"S{int(m.group(1))} M03"
+                                log_fn(f"Spindle: {m.group(1)} RPM (deferred until first Z retract)")
+                            else:
+                                # Subsequent spindle changes: emit immediately.
+                                emit(nline() + f"S{int(m.group(1))} M03")
+                                log_fn(f"Spindle: {m.group(1)} RPM")
                         else:
                             log_fn(f"Warning: Could not parse RPM from: {line}")
 
@@ -774,6 +791,10 @@ def convert_file(input_path, output_path, log_fn,
                             if k in c:
                                 cmd += f" {k}{target[k]:.3f}"
                         emit(nline() + cmd)
+                        # First Z move = safe retract: spindle now starts
+                        # turning after the tool is clear of the workpiece.
+                        if "Z" in c:
+                            flush_spindle()
                         d = math.sqrt(sum((target[k] - last_pos[k]) ** 2
                                          for k in "XYZ"))
                         if d > 0:
@@ -781,6 +802,8 @@ def convert_file(input_path, output_path, log_fn,
                         last_pos = target
 
                     elif line.startswith("MOVEABS"):
+                        flush_moveabs_buffer()
+                        flush_spindle()
                         c      = parse_coord(line)
                         target = last_pos.copy()
                         target.update(c)
@@ -812,6 +835,7 @@ def convert_file(input_path, output_path, log_fn,
 
                     elif line.startswith("VEL"):
                         flush_moveabs_buffer()
+                        flush_spindle()
                         m = re.search(r"VEL\s*(\d+(?:\.\d+)?)", line)
                         if m:
                             current_feed = float(m.group(1)) / VEL_RATIO
@@ -822,6 +846,7 @@ def convert_file(input_path, output_path, log_fn,
 
                     elif line.startswith("CWABS") or line.startswith("CCWABS"):
                         flush_moveabs_buffer()
+                        flush_spindle()
                         cw = line.startswith("CWABS")
                         if current_feed is None:
                             current_feed = DEFAULT_FEED
@@ -850,6 +875,7 @@ def convert_file(input_path, output_path, log_fn,
                     continue
 
             flush_moveabs_buffer()
+            flush_spindle()
 
         emit(nline() + "M05")
         emit(nline() + "M30")
