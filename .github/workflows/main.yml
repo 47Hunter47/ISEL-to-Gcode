@@ -17,23 +17,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Sync version from release tag
-        run: python sync_version.py
-
-      - name: Commit version files back to main
+      - name: Sync version (auto-increment on release)
+        id: sync
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add version.py version_info.txt
-          if git diff --cached --quiet; then
-            echo "No version changes to commit."
-          else
-            git commit -m "chore: sync version from release tag"
-            COMMIT_HASH=$(git rev-parse HEAD)
-            git checkout main
-            git cherry-pick $COMMIT_HASH
-            git push origin main
-          fi
+          python sync_version.py
+          echo "version=$(cat .version)" >> $GITHUB_OUTPUT
 
       - name: Install dependencies
         run: |
@@ -42,11 +30,11 @@ jobs:
 
       - name: Build EXE
         run: |
-          pyinstaller --onefile --windowed --icon=icon.ico --collect-all tkinterdnd2 --hidden-import=numpy --version-file=version_info.txt --name ISEL_to_Gcode isel_to_gcode_gui.py
+          pyinstaller --onefile --windowed --icon=icon.ico --collect-all tkinterdnd2 --hidden-import=numpy --name ISEL_to_Gcode isel_to_gcode_gui.py
 
       - name: Upload EXE
         uses: actions/upload-artifact@v6
         with:
-          name: ISEL_to_Gcode_EXE
+          name: ISEL_to_Gcode_v${{ steps.sync.outputs.version }}
           path: dist/ISEL_to_Gcode.exe
           retention-days: 7
