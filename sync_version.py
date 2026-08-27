@@ -1,42 +1,121 @@
-"""Sync APP_VERSION from the GitHub release tag into version.py and version_info.txt.
+"""Release versiyon senkronizasyonu.
 
-Runs in CI on release events. Reads GITHUB_REF_NAME (the release tag), rewrites
-version.py and version_info.txt to match, and prints the new version.
-On manual runs (no release tag) it leaves everything untouched.
+Her release'de:
+- Tag bir versiyonsa (v2.1, 2.1) o kullanilir.
+- Tag versiyon degilse, main'deki guncel versiyon otomatik artirilir (2.0 -> 2.1).
+- workflow_dispatch (manuel calistirma) icin versiyon artirilmaz.
+- version.py + README badge main'e GitHub API ile commit edilir.
+- .version dosyasina hedef versiyon yazilir (artifact adi icin).
 """
+import base64
+import json
 import os
 import re
 import sys
+import urllib.request
+
+API = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}"
+TOKEN = os.environ["GITHUB_TOKEN"]
+
+
+def api(path, method="GET", data=None):
+    """GitHub Contents API cagrisi."""
+    req = urllib.request.Request(
+        API + path,
+        data=json.dumps(data).encode() if data is not None else None,
+        headers={
+            "Authorization": f"token {TOKEN}",
+            "Accept": "application/vnd.github+json",
+        },
+        method=method,
+    )
+    with urllib.request.urlopen(req) as r:
+        return json.loads(r.read())
+
+
+def read_remote(path):
+    """Dosya icerigi + sha dondur (main)."""
+    d = api(f"/contents/{path}")
+    return base64.b64decode(d["content"]).decode("utf-8"), d["sha"]
+
+
+def write_remote(path, content, sha, message):
+    """Dosyayi main'e commit et."""
+    api(f"/contents/{path}", method="PUT", data={
+        "message": message,
+        "content": base64.b64encode(content.encode("utf-8")).decode(),
+        "sha": sha,
+        "branch": "main",
+    })
+
+
+def parse_version(s):
+    """Metinden ilk sayisal versiyonu cikar (2.0, v2.1 -> '2.1')."""
+    m = re.search(r"(\d+(?:\.\d+)*)", s or "")
+    return m.group(1) if m else None
+
+
+def next_version(cur):
+    """Son bileseni artir: 2.0 -> 2.1, 2.1.3 -> 2.1.4."""
+    parts = cur.split(".")
+    parts[-1] = str(int(parts[-1]) + 1)
+    return ".".join(parts)
 
 
 def main():
+    event = os.environ.get("GITHUB_EVENT_NAME", "")
     tag = os.environ.get("GITHUB_REF_NAME", "")
-    m = re.match(r"^v?(\d+(?:\.\d+)*)$", tag)
-    if not m:
-        print(f"No release tag in GITHUB_REF_NAME ({tag!r}); skipping version sync.")
-        return
 
-    ver = m.group(1)
-    parts = (ver.split(".") + ["0", "0", "0", "0"])[:4]
+    vpy, vpy_sha = read_remote("version.py")
+    cur = parse_version(vpy)
+    if not cur:
+        sys.exit(f"ERROR: main'deki version.py icinde versiyon bulunamadi: {vpy!r}")
 
-    # version.py - imported by the GUI at runtime
+    # Hedef versiyonu belirle
+    if event == "workflow_dispatch":
+        target = cur  # manuel calistirmada artis yok
+        print(f"workflow_dispatch -> versiyon degistirilmedi: {target}")
+    else:
+        tag_ver = parse_version(tag)
+        if tag_ver:
+            target = tag_ver
+            print(f"Tag versiyonu kullaniliyor: {tag} -> {target}")
+        else:
+            target = next_version(cur)
+            print(f"Tag versiyon degil ({tag!r}) -> otomatik artis: {cur} -> {target}")
+
+    # Build icin yerel dosyalar
+    new_vpy = f'APP_VERSION = "{target}"\n'
     with open("version.py", "w") as f:
-        f.write(f'APP_VERSION = "{parts[0]}.{parts[1]}"\n')
+        f.write(new_vpy)
 
-    # version_info.txt - PyInstaller EXE metadata (kept consistent)
-    try:
-        t = open("version_info.txt").read()
-    except FileNotFoundError:
-        t = None
-    if t is not None:
-        t = re.sub(r"filevers=\([\d, ]+\)", f"filevers=({', '.join(parts)})", t)
-        t = re.sub(r"prodvers=\([\d, ]+\)", f"prodvers=({', '.join(parts)})", t)
-        full = ".".join(parts[:3])
-        t = re.sub(r"StringStruct\('FileVersion', '[^']*'\)", f"StringStruct('FileVersion', '{full}')", t)
-        t = re.sub(r"StringStruct\('ProductVersion', '[^']*'\)", f"StringStruct('ProductVersion', '{full}')", t)
-        open("version_info.txt", "w").write(t)
+    readme, readme_sha = read_remote("README.md")
+    new_readme = re.sub(
+        r"version-\d+(?:\.\d+)*-(\w+)", f"version-{target}-\\1", readme
+    )
+    with open("README.md", "w") as f:
+        f.write(new_readme)
 
-    print(f"Version synced to {parts[0]}.{parts[1]}")
+    # main'e commit et (degisiklik varsa)
+    if new_vpy != vpy:
+        write_remote("version.py", new_vpy, vpy_sha,
+                     f"chore: sync version to {target}")
+        print(f"version.py main'e commit edildi: {target}")
+    else:
+        print("version.py zaten guncel")
+
+    if new_readme != readme:
+        write_remote("README.md", new_readme, readme_sha,
+                     f"chore: sync version badge to {target}")
+        print(f"README.md main'e commit edildi: {target}")
+    else:
+        print("README.md zaten guncel")
+
+    # Artifact adi icin versiyonu yaz
+    with open(".version", "w") as f:
+        f.write(target)
+
+    print(f"Versiyon senkronize edildi: {target}")
 
 
 if __name__ == "__main__":
