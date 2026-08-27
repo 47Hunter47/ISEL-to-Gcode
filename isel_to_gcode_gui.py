@@ -1,7 +1,7 @@
 try:
     from version import APP_VERSION
 except ImportError:
-    APP_VERSION = "1.99"
+    APP_VERSION = "2.0"
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
