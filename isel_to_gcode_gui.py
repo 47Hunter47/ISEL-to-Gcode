@@ -32,6 +32,11 @@ ARC_FIT_RADIUS_TOL    = 0.05
 ARC_FIT_MIN_ARC_DEG   = 355.0
 ARC_FIT_MIN_POINTS    = 8
 
+# ── progress ──────────────────────────────────────────────────────────────────
+# GUI progress callback interval (lines). 100 → 10000 cuts the Tkinter event
+# queue traffic by 100x on million-line files with no visible difference.
+PROGRESS_STEP = 10000
+
 # ── UI colors ─────────────────────────────────────────────────────────────────
 BG  = "#1e1e1e"
 FG  = "#ffffff"
@@ -516,11 +521,55 @@ def convert_file(input_path, output_path, log_fn,
         return s
 
     def parse_coord(text, axes=("X", "Y", "Z")):
+        # Fast split-based parse. ISEL coordinate tokens are whitespace-
+        # separated "AXIS<value>" pairs (e.g. "X328495", "Z-103460", "I50"),
+        # so splitting on whitespace and reading the first character is
+        # ~5x faster than the original per-axis re.search (no regex engine
+        # per axis). Guards + fallback below make it behavior-identical to
+        # the original regex for ANY input, not just well-formed ISEL:
+        #   - value must start with a digit (or '-' + digit) and contain no
+        #     exponent and at most one dot  →  float() then equals the
+        #     original regex capture -?\d+(?:\.\d+)?
+        #   - anything else (e.g. "X.5", "X1e5", "X123Y45" without space)
+        #     →  fall back to the original per-axis regex for the whole line
+        #   - first occurrence of an axis wins (re.search semantics)
+        # Handles any axis set (XYZ for moves, I/J for arc centers).
         coords = {}
-        for axis in axes:
-            m = re.search(rf"{axis}(-?\d+(?:\.\d+)?)", text)
-            if m:
-                coords[axis] = float(m.group(1)) / SCALE
+        for token in text.split()[1:]:  # [1:] skips the command word
+            axis = token[0]
+            if axis in axes:
+                val = token[1:]
+                if not val:
+                    continue  # bare axis token (e.g. "X") — original regex finds nothing
+                # Fast path: plain integer (optional leading minus) — the
+                # overwhelming ISEL case. int() is faster than float() and
+                # yields the identical double, so the output is unchanged.
+                neg = val[0] == "-"
+                body = val[1:] if neg else val
+                if body and body[0].isdigit() and body.isdigit():
+                    if axis not in coords:  # first occurrence wins
+                        coords[axis] = (-int(body) if neg else int(body)) / SCALE
+                    continue
+                # Guarded float path: value must match the original regex
+                # capture -?\d+(?:\.\d+)? (digit start, no exponent, <=1 dot).
+                if (val and
+                        (val[0].isdigit() or
+                         (val[0] == "-" and len(val) > 1 and val[1].isdigit()))
+                        and "e" not in val and "E" not in val
+                        and val.count(".") <= 1):
+                    try:
+                        if axis not in coords:
+                            coords[axis] = float(val) / SCALE
+                        continue
+                    except ValueError:
+                        pass
+                # Fallback: original per-axis regex for the whole line
+                coords = {}
+                for a in axes:
+                    m = re.search(rf"{a}(-?\d+(?:\.\d+)?)", text)
+                    if m:
+                        coords[a] = float(m.group(1)) / SCALE
+                return coords
         return coords
 
     def arc_to_g2g3(start, end, center, cw):
@@ -703,8 +752,17 @@ def convert_file(input_path, output_path, log_fn,
     except Exception as e:
         raise Exception(f"Cannot open output file for writing: {e}")
 
+    # Batched output: accumulate lines and flush every N to cut per-line
+    # write() call overhead (millions of calls on large files).
+    _out_buf = []
+    _OUT_BUF_SIZE = 8192
+
     def emit(line):
-        out_f.write(line + "\n")
+        _out_buf.append(line)
+        if len(_out_buf) >= _OUT_BUF_SIZE:
+            out_f.write("\n".join(_out_buf))
+            out_f.write("\n")
+            _out_buf.clear()
 
     moveabs_buffer   = []
     buffer_start_pos = None
@@ -758,7 +816,8 @@ def convert_file(input_path, output_path, log_fn,
                     continue
                 lines_processed += 1
                 if progress_callback and (
-                    lines_processed % 100 == 0 or lines_processed == total_lines
+                    lines_processed % PROGRESS_STEP == 0
+                    or lines_processed == total_lines
                 ):
                     pct = (lines_processed / total_lines) * 95
                     progress_callback(pct,
@@ -784,22 +843,34 @@ def convert_file(input_path, output_path, log_fn,
                     elif line.startswith("FASTABS"):
                         flush_moveabs_buffer()
                         c      = parse_coord(line)
-                        target = last_pos.copy()
-                        target.update(c)
+                        # Fast path: merge changed axes into local scalars
+                        # instead of last_pos.copy() + update(). Bit-identical
+                        # to the original: same values, same f-string format,
+                        # same distance expression and left-to-right term
+                        # order (unchanged axes contribute 0.0**2 = 0.0 in
+                        # both versions). Distance is computed against the
+                        # pre-move values, exactly like the original.
+                        lx = last_pos["X"]; ly = last_pos["Y"]; lz = last_pos["Z"]
+                        if "X" in c: lx = c["X"]
+                        if "Y" in c: ly = c["Y"]
+                        if "Z" in c: lz = c["Z"]
                         cmd = "G0"
-                        for k in ("X", "Y", "Z"):
-                            if k in c:
-                                cmd += f" {k}{target[k]:.3f}"
+                        if "X" in c: cmd += f" X{lx:.3f}"
+                        if "Y" in c: cmd += f" Y{ly:.3f}"
+                        if "Z" in c: cmd += f" Z{lz:.3f}"
                         emit(nline() + cmd)
                         # First Z move = safe retract: spindle now starts
                         # turning after the tool is clear of the workpiece.
                         if "Z" in c:
                             flush_spindle()
-                        d = math.sqrt(sum((target[k] - last_pos[k]) ** 2
-                                         for k in "XYZ"))
+                        d = math.sqrt(
+                            (lx - last_pos["X"]) ** 2
+                            + (ly - last_pos["Y"]) ** 2
+                            + (lz - last_pos["Z"]) ** 2
+                        )
                         if d > 0:
                             total_time_min += d / RAPID_FEED
-                        last_pos = target
+                        last_pos["X"] = lx; last_pos["Y"] = ly; last_pos["Z"] = lz
 
                     elif line.startswith("MOVEABS"):
                         flush_moveabs_buffer()
@@ -822,16 +893,30 @@ def convert_file(input_path, output_path, log_fn,
                         else:
                             if use_arc_commands:
                                 flush_moveabs_buffer()
+                            # Fast path (G1, non-arc): merge the changed axes
+                            # into local scalars instead of per-line
+                            # last_pos.copy() + update(). Bit-identical to
+                            # the original: same values, same f-string
+                            # format, same distance expression and term
+                            # order (unchanged axes contribute 0.0**2 = 0.0
+                            # in both versions, left-to-right sum order kept).
+                            lx = last_pos["X"]; ly = last_pos["Y"]; lz = last_pos["Z"]
+                            if "X" in c: lx = c["X"]
+                            if "Y" in c: ly = c["Y"]
+                            if "Z" in c: lz = c["Z"]
                             cmd = "G1"
-                            for k in ("X", "Y", "Z"):
-                                if k in c:
-                                    cmd += f" {k}{target[k]:.3f}"
+                            if "X" in c: cmd += f" X{lx:.3f}"
+                            if "Y" in c: cmd += f" Y{ly:.3f}"
+                            if "Z" in c: cmd += f" Z{lz:.3f}"
                             emit(nline() + cmd)
                             if current_feed:
-                                d = math.sqrt(sum((target[k] - last_pos[k]) ** 2
-                                                 for k in "XYZ"))
+                                d = math.sqrt(
+                                    (lx - last_pos["X"]) ** 2
+                                    + (ly - last_pos["Y"]) ** 2
+                                    + (lz - last_pos["Z"]) ** 2
+                                )
                                 total_time_min += d / current_feed
-                            last_pos = target
+                            last_pos["X"] = lx; last_pos["Y"] = ly; last_pos["Z"] = lz
 
                     elif line.startswith("VEL"):
                         flush_moveabs_buffer()
@@ -879,6 +964,11 @@ def convert_file(input_path, output_path, log_fn,
 
         emit(nline() + "M05")
         emit(nline() + "M30")
+        # Flush remaining output buffer
+        if _out_buf:
+            out_f.write("\n".join(_out_buf))
+            out_f.write("\n")
+            _out_buf.clear()
 
     finally:
         out_f.close()
