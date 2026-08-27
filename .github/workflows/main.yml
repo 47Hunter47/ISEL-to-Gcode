@@ -29,8 +29,9 @@ jobs:
             echo "No version changes to commit."
           else
             git commit -m "chore: sync version from release tag"
+            COMMIT_HASH=$(git rev-parse HEAD)
             git checkout main
-            git cherry-pick HEAD@{1}
+            git cherry-pick $COMMIT_HASH
             git push origin main
           fi
 
