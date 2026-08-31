@@ -41,9 +41,8 @@ N00003 G40
 N00004 G49
 N00005 G90
 N00006 G94
-N00007 G0 X... Y...
-N00008 G0 Z...        ← first Z safe retract
-N00009 S1200 M03      ← spindle starts after the tool is clear
+N00007 G0 Z...        ← first Z safe retract
+N00008 S1200 M03      ← spindle starts after the tool is clear
 ...
 M05
 M30
