@@ -230,6 +230,7 @@ impl eframe::App for App {
     // eframe 0.37 split the old `update` into `logic` (no painting) + `ui`.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain();
+        shot_hook(ctx);
 
         // drag & drop
         let dropped: Vec<PathBuf> = ctx.input_mut(|i| {
@@ -402,6 +403,64 @@ impl eframe::App for App {
     }
 }
 
+/// `ISEL_SHOT=out.bmp`: paint one frame, write it out and quit. Machines with no
+/// visible desktop (Session 0, CI) otherwise cannot see this GUI at all.
+/// shortcut: BMP only (no alpha), only used by the shot check.
+fn shot_hook(ctx: &egui::Context) {
+    static DONE: std::sync::Once = std::sync::Once::new();
+    let Some(path) = std::env::var_os("ISEL_SHOT") else {
+        return;
+    };
+    DONE.call_once(|| {
+        let path = PathBuf::from(path);
+        startup_log(&format!("ISEL_SHOT -> {}", path.display()));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::ScreenshotCallback::new(
+            move |img: std::sync::Arc<egui::ColorImage>| match write_bmp(&path, &img) {
+                Ok(()) => {
+                    startup_log("ISEL_SHOT written");
+                    std::process::exit(0);
+                }
+                Err(e) => startup_log(&format!("ISEL_SHOT failed: {e}")),
+            },
+        )));
+        ctx.request_repaint();
+    });
+}
+
+/// 24-bit BMP by hand, so the shipped exe carries no image encoder.
+fn write_bmp(path: &std::path::Path, img: &egui::ColorImage) -> std::io::Result<()> {
+    use std::io::Write;
+    let w = img.size[0] as u32;
+    let h = img.size[1] as u32;
+    let row = (w * 3 + 3) / 4 * 4;
+    let pix = row * h;
+    let mut hdr: Vec<u8> = Vec::with_capacity(54);
+    hdr.extend_from_slice(b"BM");
+    hdr.extend_from_slice(&(54 + pix).to_le_bytes());
+    hdr.extend_from_slice(&0u32.to_le_bytes());
+    hdr.extend_from_slice(&54u32.to_le_bytes());
+    hdr.extend_from_slice(&40u32.to_le_bytes());
+    hdr.extend_from_slice(&w.to_le_bytes());
+    hdr.extend_from_slice(&(h as i32).to_le_bytes());
+    hdr.extend_from_slice(&1u16.to_le_bytes());
+    hdr.extend_from_slice(&24u16.to_le_bytes());
+    hdr.extend_from_slice(&0u32.to_le_bytes());
+    hdr.extend_from_slice(&pix.to_le_bytes());
+    hdr.extend_from_slice(&[0u8; 16]); // planes/sizes already written: infoheader is 40 bytes
+    let pad = vec![0u8; (row - w * 3) as usize];
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(&hdr)?;
+    for y in (0..img.size[1]).rev() {
+        let row_start = y * img.size[0];
+        for x in 0..img.size[0] {
+            let [r, g, b, _] = img.pixels[row_start + x].to_opaque().to_srgba_unmultiplied();
+            f.write_all(&[b, g, r])?;
+        }
+        f.write_all(&pad)?;
+    }
+    Ok(())
+}
+
 pub fn run() {
     run_with(None);
 }
@@ -501,7 +560,7 @@ pub fn run_with(prefill: Option<String>) {
             Box::new(move |cc| {
                 // Fills, strokes, corner radii, selection and the text hierarchy
                 // all come from theme::visuals().
-                cc.egui_ctx.set_visuals(theme::visuals());
+                theme::apply(&cc.egui_ctx);
                 let mut app = App::default();
                 if let Some(p) = prefill {
                     app.input = p;
@@ -528,6 +587,43 @@ pub fn run_with(prefill: Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shot_bmp_is_bottom_up_bgr() {
+        // A known 2x2 grid, checked byte by byte: header, row order, BGR order.
+        let img = egui::ColorImage::new(
+            [2, 2],
+            vec![
+                Color32::RED,
+                Color32::from_rgb(0, 255, 0),
+                Color32::from_rgb(0, 0, 255),
+                Color32::WHITE,
+            ],
+        );
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/shot_check.bmp");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_bmp(&path, &img).unwrap();
+        let b = std::fs::read(&path).unwrap();
+        assert_eq!(&b[0..2], b"BM");
+        assert_eq!(&b[18..22], 2u32.to_le_bytes(), "width");
+        assert_eq!(&b[22..26], 2u32.to_le_bytes(), "height stays positive (bottom-up)");
+        assert_eq!(&b[28..30], 24u16.to_le_bytes(), "24 bit");
+        // a 2 px row is 6 bytes, padded to 8; bottom row first, and BMP stores
+        // blue as (255,0,0)
+        let stride = 8;
+        assert_eq!(
+            &b[54..54 + stride],
+            &[255, 0, 0, 255, 255, 255, 0, 0],
+            "bottom row: blue, white, then the row pad"
+        );
+        assert_eq!(
+            &b[54 + stride..54 + 2 * stride],
+            &[0, 0, 255, 0, 255, 0, 0, 0],
+            "top row: red, green, then the row pad"
+        );
+        assert_eq!(b.len(), 54 + 2 * stride);
+    }
+
 
     fn golden(name: &str) -> String {
         concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/").to_string() + name

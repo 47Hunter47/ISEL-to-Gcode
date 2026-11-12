@@ -108,5 +108,36 @@ pub fn visuals() -> Visuals {
 
 /// Apply the palette to a live egui context.
 pub fn apply(ctx: &egui::Context) {
-    ctx.set_visuals(visuals());
+    let v = visuals();
+    // egui keeps one style per theme bucket and picks the bucket from the OS
+    // theme. Setting only the current bucket (what `set_visuals` does) leaks
+    // egui's own light defaults on a light-mode Windows: white progress track,
+    // white checkbox. Fill both buckets and pin the preference.
+    ctx.set_theme(egui::ThemePreference::Dark);
+    ctx.set_visuals_of(egui::Theme::Dark, v.clone());
+    ctx.set_visuals_of(egui::Theme::Light, v);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_survives_the_light_system_theme() {
+        // Regression: a light-mode Windows used to show egui's stock light
+        // defaults (white progress track and checkbox) because only the active
+        // theme bucket had been filled.
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let v = &ctx.style_of(theme).visuals;
+            assert_eq!(v.panel_fill, PANEL, "{theme:?} panel_fill");
+            assert_eq!(
+                v.extreme_bg_color, DEEP,
+                "{theme:?} extreme_bg_color is the progress bar track"
+            );
+            assert_eq!(v.widgets.inactive.bg_fill, BTN, "{theme:?} widget fill");
+            assert_eq!(v.widgets.noninteractive.fg_stroke.color, TEXT, "{theme:?} label text");
+        }
+    }
 }
