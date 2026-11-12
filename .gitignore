@@ -1,7 +1,6 @@
 graphify-out/
 graph_update.log
 .codegraph/
-AGENTS.md
 __pycache__/
 *.pyc
 dist/

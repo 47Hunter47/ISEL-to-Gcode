@@ -1,4 +1,5 @@
 // Literal port of isel_to_gcode_gui.py convert_file() (python lines 497-983).
+// That reference file is no longer in the tree: git show 9b1fa1d^:isel_to_gcode_gui.py
 // Arithmetic order and format strings are copied as-is: golden tests compare
 // bytes against the python reference output.
 
@@ -302,7 +303,7 @@ impl Conv {
     }
 
     /// python fitted_arc_to_g2g3(): full circle as two semicircles.
-    /// Current behaviour keeps this unreachable (see flush_moveabs_buffer note).
+    /// Reached from flush_moveabs_buffer when a buffered run closes a circle.
     fn fitted_arc_to_g2g3(
         &mut self,
         start: Pos,
@@ -405,11 +406,9 @@ impl Conv {
         lines
     }
 
-    /// python flush_moveabs_buffer(). NOTE the dead full-circle path: python's
-    /// MOVEABS branch flushes this buffer at its top before appending, so the
-    /// buffer never holds ARC_FIT_MIN_POINTS points and try_arc_fit is never
-    /// called with >=8 points. Kept verbatim for byte parity; a fix must remove
-    /// that top flush in BOTH implementations and regenerate the arcs golden.
+    /// python flush_moveabs_buffer(). Full-circle fit is live here: the MOVEABS
+    /// branch no longer flushes at its top, so a run can reach ARC_FIT_MIN_POINTS
+    /// points and try_arc_fit turns closed circles into two semicircles in arcs mode.
     fn flush_moveabs_buffer(&mut self, log: &mut dyn FnMut(&str)) -> Vec<String> {
         if self.buffer.is_empty() {
             return vec![];
