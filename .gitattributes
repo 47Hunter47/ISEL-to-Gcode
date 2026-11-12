@@ -1,0 +1,8 @@
+# Rust/Python source: LF in repo and checkout
+* text=auto eol=lf
+# golden + fixture: store/checkout exact bytes (python writes ngc with CRLF on Windows)
+*.ngc -text
+*.isel -text
+*.log -text
+*.time -text
+*.ico binary

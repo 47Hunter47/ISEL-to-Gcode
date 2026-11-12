@@ -1,0 +1,8 @@
+Warning: No VEL found, using default F1000
+Feed: F1000
+Warning: Could not parse RPM from: SPINDLE CW
+Feed: F500
+Spindle: 1200 RPM (deferred until first Z retract)
+Warning: zero-radius arc skipped on line [CCWABS X20000 Y20000 I20000 J20000]
+Warning: Could not parse VEL from: VEL
+Spindle: 1800 RPM (deferred until first Z retract)
