@@ -34,6 +34,9 @@ pub struct App {
     rx: Option<Receiver<Msg>>,
     preview: Option<Preview>,
     dialog: Option<(String, String)>,
+    // startup diagnostics: how many logic passes ran / did ui ever paint
+    probe: u8,
+    ui_probe: u8,
 }
 
 impl Default for App {
@@ -57,6 +60,8 @@ impl Default for App {
             rx: None,
             preview: None,
             dialog: None,
+            probe: 0,
+            ui_probe: 0,
         }
     }
 }
@@ -227,9 +232,41 @@ impl eframe::App for App {
                 self.push_log(format!("Error: Not a valid file: {}", p.display()));
             }
         }
+
+        // eframe keeps the window hidden until it has painted a frame, and on Windows an
+        // invisible window gets no RedrawRequested, so nothing would ever paint and the
+        // window would stay hidden forever. If egui reports it hidden, ask for a paint and
+        // force it shown, and keep the loop ticking until it really is visible.
+        let (visible, inner) = ctx.input(|i| {
+            let vp = i.viewport();
+            (
+                vp.visible(),
+                vp.inner_rect
+                    .map(|r| (r.min.x as i32, r.min.y as i32, r.max.x as i32, r.max.y as i32)),
+            )
+        });
+        if visible == Some(false) {
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::RequestPaintWhileHidden,
+            );
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
+            ctx.request_repaint();
+        }
+        if self.probe < 5 {
+            self.probe += 1;
+            startup_log(&format!(
+                "logic pass {} visible={:?} inner={:?}",
+                self.probe, visible, inner
+            ));
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.ui_probe == 0 {
+            self.ui_probe = 1;
+            startup_log("ui pass ran (first paint)");
+        }
         let ctx = ui.ctx().clone();
         egui::Frame::new()
             .fill(BG)
@@ -437,10 +474,14 @@ pub fn run_with(prefill: Option<String>) {
                     app.input = p;
                     app.push_log(format!("File selected: {}", app.input));
                 }
+                startup_log("app creator finished");
                 Ok(Box::new(app))
             }),
         ) {
-            Ok(()) => return,
+            Ok(()) => {
+                startup_log("run_native returned Ok (window closed)");
+                return;
+            }
             Err(e) => startup_log(&format!("renderer {renderer:?} failed: {e}")),
         }
     }
