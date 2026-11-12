@@ -23,7 +23,7 @@ Windows GUI application that converts ISEL CAM files into standard G-code (NC) p
 
 1. Download the latest release (`ISEL_to_Gcode.exe`) from the [Releases](https://github.com/47Hunter47/ISEL-to-Gcode/releases) page.
 2. Run the executable.
-3. Drag & drop your ISEL file onto the window (or click **Browse**, or drop the file onto the `ISEL_to_Gcode.exe` icon).
+3. Drag & drop your ISEL file (`.isel`) or ISELCAM export (`.ncp`) onto the window (or click **Browse**, or drop the file onto the `ISEL_to_Gcode.exe` icon).
 4. Optionally enable **Use G2/G3 arc commands** if your controller supports arcs.
 5. Click **Convert** and choose a save location (`.ngc`).
 6. Open **Preview** to inspect the toolpath before running the program.
