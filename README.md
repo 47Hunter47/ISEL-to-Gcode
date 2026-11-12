@@ -3,7 +3,7 @@
 Windows GUI application that converts ISEL CAM files into standard G-code (NC) programs for CNC machines.
 
 ![version](https://img.shields.io/badge/version-2.0-blue)
-![python](https://img.shields.io/badge/python-3.10+-green)
+![rust](https://img.shields.io/badge/rust-stable-orange)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey)
 
 ## Features
@@ -12,18 +12,18 @@ Windows GUI application that converts ISEL CAM files into standard G-code (NC) p
 - **Coordinate conversion** — ISEL integer coordinates (×1000) to mm
 - **Feed conversion** — ISEL `VEL` values to G-code `F` feed rates
 - **Two output modes:**
-  - `G1 linearised` — arcs expanded into short line segments (numpy-accelerated when available)
+  - `G1 linearised` — arcs expanded into short line segments
   - `G2/G3 arc commands` — true arc output with full-circle detection (R format, split into two semicircles for controller compatibility)
 - **Spindle handling** — `S... M03` from `SPINDLE CW`, with `M05`/`M30` program end
 - **Toolpath preview** — top-down and isometric views with grid, pan, and zoom
 - **Estimated cycle time** shown after conversion
-- Single-file `.exe` (PyInstaller) — no Python installation required
+- Single-file `.exe` — no installation required
 
 ## Usage
 
 1. Download the latest release (`ISEL_to_Gcode.exe`) from the [Releases](https://github.com/47Hunter47/ISEL-to-Gcode/releases) page.
 2. Run the executable.
-3. Drag & drop your ISEL file onto the window (or click **Browse**).
+3. Drag & drop your ISEL file onto the window (or click **Browse**, or drop the file onto the `ISEL_to_Gcode.exe` icon).
 4. Optionally enable **Use G2/G3 arc commands** if your controller supports arcs.
 5. Click **Convert** and choose a save location (`.ngc`).
 6. Open **Preview** to inspect the toolpath before running the program.
@@ -52,13 +52,19 @@ The first spindle command is emitted **after** the first Z safe retract, so the 
 
 ## Building from source
 
-Requires Python 3.10+ on Windows.
+Requires Rust (the `rust/rust-toolchain.toml` file pins the toolchain) and, on
+Windows, the GNU binutils that toolchain needs for linking (MSYS2/WinLibs or
+`winget install BrechtSanders.WinLibs.POSIX.UCRT`).
 
 ```bat
-pip install pyinstaller tkinterdnd2 numpy
-pyinstaller --onefile --windowed --icon=icon.ico --collect-all tkinterdnd2 --hidden-import=numpy --name ISEL_to_Gcode isel_to_gcode_gui.py
+cd rust
+cargo build --release
 ```
 
-The executable is created in `dist\`.
+The executable is created in `rust/target/release/`. The same executable also runs
+without the window for scripting: `ISEL_to_Gcode.exe convert in.isel out.ngc [--arcs]`.
+
+`cargo test` compares the output byte-for-byte with reference conversions,
+including two real customer programs in `tests/fixtures`.
 
 A release build is also triggered automatically by GitHub Actions when a new release is published.
