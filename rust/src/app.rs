@@ -237,12 +237,13 @@ impl eframe::App for App {
         // invisible window gets no RedrawRequested, so nothing would ever paint and the
         // window would stay hidden forever. If egui reports it hidden, ask for a paint and
         // force it shown, and keep the loop ticking until it really is visible.
-        let (visible, inner) = ctx.input(|i| {
+        let (visible, inner, monitor) = ctx.input(|i| {
             let vp = i.viewport();
             (
                 vp.visible(),
                 vp.inner_rect
                     .map(|r| (r.min.x as i32, r.min.y as i32, r.max.x as i32, r.max.y as i32)),
+                vp.monitor_size.map(|s| (s.x as i32, s.y as i32)),
             )
         });
         if visible == Some(false) {
@@ -256,8 +257,8 @@ impl eframe::App for App {
         if self.probe < 5 {
             self.probe += 1;
             startup_log(&format!(
-                "logic pass {} visible={:?} inner={:?}",
-                self.probe, visible, inner
+                "logic pass {} visible={:?} inner={:?} monitor={:?}",
+                self.probe, visible, inner, monitor
             ));
         }
     }
@@ -420,9 +421,17 @@ fn show_error(text: &str) {
 
 pub fn run_with(prefill: Option<String>) {
     startup_log(&format!(
-        "started v{} exe={:?} prefill={:?}",
+        "started v{} exe={:?} mtime={} prefill={:?}",
         APP_VERSION,
         std::env::current_exe(),
+        // build fingerprint: which exe he actually ran
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| std::fs::metadata(&p).ok())
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
         prefill
     ));
     std::panic::set_hook(Box::new(|info| {
@@ -445,10 +454,15 @@ pub fn run_with(prefill: Option<String>) {
             }
         });
 
-    // eframe's default renderer is wgpu (DirectX); glow (OpenGL) is tried if it
-    // fails, since a broken/absent graphics driver is the usual cause of a
-    // window that never appears.
-    for renderer in [eframe::Renderer::Wgpu, eframe::Renderer::Glow] {
+    // eframe's default renderer is wgpu (DirectX); glow (OpenGL) is the fallback.
+    // OpenGL comes first: it needs no async device creation, so a driver that
+    // stalls inside wgpu can't block startup. ISEL_RENDERER=wgpu forces the other order.
+    let mut order = [eframe::Renderer::Glow, eframe::Renderer::Wgpu];
+    if std::env::var("ISEL_RENDERER").as_deref() == Ok("wgpu") {
+        order = [eframe::Renderer::Wgpu, eframe::Renderer::Glow];
+    }
+    for renderer in order {
+        startup_log(&format!("trying {renderer:?}"));
         let mut viewport = egui::ViewportBuilder::default()
             .with_inner_size([520.0, 620.0])
             .with_title(format!("ISEL \u{2192} G-code Converter v{}", APP_VERSION));
