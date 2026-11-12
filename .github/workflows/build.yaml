@@ -1,0 +1,42 @@
+name: Build Windows EXE
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v5
+
+      # rust-toolchain.toml pins stable-x86_64-pc-windows-gnu; rustup installs it on demand.
+      # The GNU target needs binutils (as/dlltool); the runner image ships C:\mingw64.
+      - run: echo "C:\\mingw64\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - run: cargo test
+      # golden.rs compares against the python reference byte-for-byte
+
+  build:
+    needs: test
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v5
+      - run: echo "C:\\mingw64\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - run: cargo build --release
+      - name: Version from Cargo.toml
+        id: ver
+        run: $ver = ((Get-Content Cargo.toml | Select-String -Pattern '^version = ' | Select-Object -First 1) -replace '^version = "(.*)"', '$1'); "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ISEL_to_Gcode_v${{ steps.ver.outputs.version }}
+          path: rust/target/release/ISEL_to_Gcode.exe
+          retention-days: 7

@@ -5,36 +5,55 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
+env:
+  # ref name goes through env, never interpolated into the shell, so an odd tag
+  # name cannot inject commands
+  REF_NAME: ${{ github.ref_name }}
 jobs:
   build:
     runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rust
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
 
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
+      # GNU target needs binutils (as/dlltool); the runner image ships C:\mingw64.
+      - run: echo "C:\\mingw64\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Sync version (auto-increment on release)
-        id: sync
+      - name: Version (release tag must match Cargo.toml; dispatch uses Cargo.toml)
+        id: ver
         run: |
-          python sync_version.py
-          echo "version=$(cat .version)" >> $GITHUB_OUTPUT
+          $tag = $env:REF_NAME -replace '^v', ''
+          $cargo = ((Get-Content Cargo.toml | Select-String -Pattern '^version = ' | Select-Object -First 1) -replace '^version = "(.*)"', '$1')
+          if ($env:GITHUB_EVENT_NAME -eq 'release') {
+            if ($tag -notmatch '^\d+(\.\d+)*$') {
+              Write-Error "Release tag '$env:REF_NAME' is not a version - tag the release as vX.Y.Z"
+              exit 1
+            }
+            if ($tag -ne $cargo) {
+              Write-Error "Tag v$tag but Cargo.toml says $cargo - bump Cargo.toml before tagging"
+              exit 1
+            }
+            $ver = $tag
+          } else {
+            $ver = $cargo
+          }
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Output "Using version $ver"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller tkinterdnd2 numpy
-
-      - name: Build EXE
-        run: |
-          pyinstaller --onefile --windowed --icon=icon.ico --collect-all tkinterdnd2 --hidden-import=numpy --name ISEL_to_Gcode isel_to_gcode_gui.py
+      - run: cargo test
+      - run: cargo build --release
 
       - name: Upload EXE
         uses: actions/upload-artifact@v6
         with:
-          name: ISEL_to_Gcode_v${{ steps.sync.outputs.version }}
-          path: dist/ISEL_to_Gcode.exe
+          name: ISEL_to_Gcode_v${{ steps.ver.outputs.version }}
+          path: rust/target/release/ISEL_to_Gcode.exe
           retention-days: 7
+
+      - name: Attach EXE to release
+        if: github.event_name == 'release'
+        run: gh release upload "$env:REF_NAME" target/release/ISEL_to_Gcode.exe --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
