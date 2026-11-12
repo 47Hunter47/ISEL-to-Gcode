@@ -1,4 +1,4 @@
-name: Build Windows EXE
+name: CI (test + build)
 on:
   push:
     branches:
