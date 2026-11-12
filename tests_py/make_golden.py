@@ -9,7 +9,8 @@ stub.TkinterDnD = _TD
 sys.modules["tkinterdnd2"] = stub
 sys.path.insert(0, root)
 import isel_to_gcode_gui as G
-G._NUMPY = False  # canonical: pure-python linearization == the single Rust path
+G._NUMPY = False  # canonical for the synthetic fixture: pure == numpy bytes here (verified);
+# the shipped-path goldens are Mert's real programs in demo*_expected.*.ngc, compared in real_programs.rs
 
 fixture = os.path.join(root, "tests", "fixtures", "sample.isel")
 outdir = os.path.join(root, "tests", "fixtures")
