@@ -18,6 +18,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # rust-toolchain.toml pins a fully-qualified channel; rustup only accepts
+      # that when the toolchain already exists, so install it explicitly.
+      - run: rustup toolchain install stable-x86_64-pc-windows-gnu --no-self-update --profile minimal
+
       # GNU target needs binutils (as/dlltool); the runner image ships C:\mingw64.
       - run: echo "C:\\mingw64\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
