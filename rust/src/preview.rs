@@ -1,17 +1,20 @@
 // Toolpath preview window: port of python open_preview() (isel_to_gcode_gui.py
 // lines 216-490) onto egui's painter. Top-down + isometric, pan, wheel zoom, fit.
-// shortcut: rapid moves are solid red, python drew them dashed; upgrade if the
+// shortcut: rapid moves are solid amber, python drew them dashed; upgrade if the
 // two move classes are ever confused at a glance.
 
 use crate::gcode::{GcodeParsed, Mt};
+use crate::theme;
 use egui::{Color32, Pos2, Rect, RichText, Sense, Stroke};
 
-pub const COLOR_CUT: Color32 = Color32::from_rgb(0x00, 0xc8, 0xff);
-pub const COLOR_RAPID: Color32 = Color32::from_rgb(0xff, 0x44, 0x44);
-pub const COLOR_ARC: Color32 = Color32::from_rgb(0x00, 0xff, 0x88);
-pub const COLOR_BG: Color32 = Color32::from_rgb(0x12, 0x12, 0x12);
-pub const COLOR_GRID: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2a);
-pub const COLOR_AXIS: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
+// Same palette as the panels (theme.rs): cyan = cutting, mint = arc, amber =
+// rapid. Everything else recedes so the toolpath is the only loud thing.
+pub const COLOR_CUT: Color32 = theme::ACCENT;
+pub const COLOR_RAPID: Color32 = theme::RAPID;
+pub const COLOR_ARC: Color32 = theme::ARC;
+pub const COLOR_BG: Color32 = theme::DEEP;
+pub const COLOR_GRID: Color32 = theme::GRID;
+pub const COLOR_AXIS: Color32 = theme::AXIS;
 const PADDING: f32 = 48.0;
 
 pub struct Preview {
@@ -137,14 +140,14 @@ impl Preview {
             .resizable(true)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Path Preview").strong());
+                    ui.label(RichText::new("PATH PREVIEW").strong());
                     let mut legend = |color: Color32, name: &str| {
                         ui.label(RichText::new("\u{2501}\u{2501}").color(color).monospace());
                         ui.label(name);
                     };
-                    legend(COLOR_CUT, "Cut");
-                    legend(COLOR_ARC, "Arc");
-                    legend(COLOR_RAPID, "Rapid");
+                    legend(COLOR_CUT, "CUT");
+                    legend(COLOR_ARC, "ARC");
+                    legend(COLOR_RAPID, "RAPID");
                     let b = &self.data.bounds;
                     ui.label(
                         RichText::new(format!(
@@ -156,11 +159,11 @@ impl Preview {
                             b.max_y - b.min_y
                         ))
                         .monospace()
-                        .color(Color32::from_rgb(0x77, 0x77, 0x77)),
+                        .color(theme::TEXT_WEAK),
                     );
                 });
                 ui.horizontal(|ui| {
-                    if ui.button("Fit").clicked() {
+                    if ui.button("FIT").clicked() {
                         self.last_rect = Rect::NOTHING;
                     }
                     ui.checkbox(&mut self.iso, "Isometric");
@@ -215,7 +218,7 @@ impl Preview {
                 break;
             }
         }
-        let text_color = Color32::from_rgb(0x4a, 0x4a, 0x4a);
+        let text_color = theme::TEXT_FAINT;
         let mut gx = (b.min_x / grid_step).floor() * grid_step;
         while gx <= b.max_x + grid_step {
             let p = self.project((gx, 0.0, 0.0));

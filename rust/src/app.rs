@@ -4,23 +4,37 @@
 
 use crate::convert::convert_file;
 use crate::preview::Preview;
+use crate::theme;
 use egui::{Color32, RichText};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 use std::time::Duration;
 
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-const BG: Color32 = Color32::from_rgb(0x1e, 0x1e, 0x1e);
-const BTN: Color32 = Color32::from_rgb(0x2d, 0x2d, 0x2d);
-const BLUE: Color32 = Color32::from_rgb(0x3a, 0x7a, 0xfe);
-const GREEN_BTN: Color32 = Color32::from_rgb(0x2a, 0x6a, 0x2a);
-const LOG_GREEN: Color32 = Color32::from_rgb(0x00, 0xff, 0x88);
+// The palette lives in theme.rs (industrial SCADA look, sampled from the
+// Siemens keyvisual). These aliases keep the UI code short.
+const BG: Color32 = theme::PANEL;
+const BTN: Color32 = theme::BTN;
+const BLUE: Color32 = theme::ACCENT;
+const GREEN_BTN: Color32 = theme::BTN_ACTIVE;
+const LOG_GREEN: Color32 = theme::LOG;
 
 enum Msg {
     Log(String),
     Progress(f64, String),
     Done(f64, String),
     Failed(String),
+}
+
+// The status line doubles as the state light: mint on success, alarm on failure.
+fn status_color(s: &str) -> Color32 {
+    if s == "Error occurred" {
+        theme::ERR
+    } else if s == "Conversion complete!" {
+        theme::OK
+    } else {
+        theme::TEXT
+    }
 }
 
 pub struct App {
@@ -273,11 +287,11 @@ impl eframe::App for App {
             .fill(BG)
             .inner_margin(10.0)
             .show(ui, |ui| {
-                ui.label(RichText::new("ISEL File").color(Color32::WHITE));
+                ui.label(RichText::new("ISEL FILE").color(theme::TEXT));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.input)
                         .desired_width(f32::INFINITY)
-                        .text_color(Color32::WHITE),
+                        .text_color(theme::TEXT),
                 );
 
                 ui.add_space(8.0);
@@ -285,7 +299,7 @@ impl eframe::App for App {
                     if ui
                         .add_enabled(
                             !self.converting,
-                            egui::Button::new("Browse").fill(BTN).min_size(egui::vec2(110.0, 28.0)),
+                            egui::Button::new("BROWSE").fill(BTN).min_size(egui::vec2(110.0, 28.0)),
                         )
                         .clicked()
                     {
@@ -294,11 +308,16 @@ impl eframe::App for App {
                             self.push_log(format!("File selected: {}", self.input));
                         }
                     }
-                    let convert_label = if self.converting { "Converting..." } else { "Convert" };
+                    let convert_label = if self.converting { "CONVERTING..." } else { "CONVERT" };
                     if ui
                         .add_enabled(
                             !self.converting,
-                            egui::Button::new(RichText::new(convert_label).strong())
+                            egui::Button::new(
+                                RichText::new(convert_label).strong().color(
+                                    // cyan fill wants dark glyphs, the dim mid-conversion fill wants light
+                                    if self.converting { theme::TEXT } else { theme::ON_ACCENT },
+                                ),
+                            )
                                 .fill(BLUE)
                                 .min_size(egui::vec2(110.0, 28.0)),
                         )
@@ -310,7 +329,7 @@ impl eframe::App for App {
                     if ui
                         .add_enabled(
                             has_out,
-                            egui::Button::new(RichText::new("Preview").strong())
+                            egui::Button::new(RichText::new("PREVIEW").strong())
                                 .fill(GREEN_BTN)
                                 .min_size(egui::vec2(110.0, 28.0)),
                         )
@@ -326,17 +345,18 @@ impl eframe::App for App {
                 );
 
                 ui.add_space(6.0);
-                ui.label(self.status.clone());
+                ui.label(RichText::new(self.status.clone()).color(status_color(&self.status)));
                 ui.add(
                     egui::ProgressBar::new(self.progress)
                         .desired_width(f32::INFINITY)
+                        .fill(theme::ACCENT)
                         .desired_height(20.0),
                 );
 
                 ui.add_space(6.0);
-                ui.label("Conversion Log");
+                ui.label("CONVERSION LOG");
                 egui::Frame::new()
-                    .fill(Color32::from_rgb(0x12, 0x12, 0x12))
+                    .fill(theme::DEEP)
                     .inner_margin(4.0)
                     .show(ui, |ui| {
                         egui::ScrollArea::vertical()
@@ -479,10 +499,9 @@ pub fn run_with(prefill: Option<String>) {
             "ISEL to G-code Converter",
             options,
             Box::new(move |cc| {
-                let mut visuals = egui::Visuals::dark();
-                visuals.panel_fill = BG;
-                visuals.window_fill = Color32::from_rgb(0x1e, 0x1e, 0x1e);
-                cc.egui_ctx.set_visuals(visuals);
+                // Fills, strokes, corner radii, selection and the text hierarchy
+                // all come from theme::visuals().
+                cc.egui_ctx.set_visuals(theme::visuals());
                 let mut app = App::default();
                 if let Some(p) = prefill {
                     app.input = p;
