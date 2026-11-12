@@ -22,5 +22,6 @@ fn main() {
             }
         }
     }
-    println!("GUI not built yet");
+    let prefill = args.get(1).and_then(|a| std::path::Path::new(a).is_file().then(|| a.clone()));
+    isel_to_gcode::app::run_with(prefill);
 }

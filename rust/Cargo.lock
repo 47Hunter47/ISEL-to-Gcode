@@ -1585,6 +1585,7 @@ name = "isel-to-gcode"
 version = "2.1.0"
 dependencies = [
  "eframe",
+ "egui",
  "image",
  "regex",
  "rfd",
