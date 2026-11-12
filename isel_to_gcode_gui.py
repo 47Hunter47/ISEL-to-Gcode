@@ -873,7 +873,9 @@ def convert_file(input_path, output_path, log_fn,
                         last_pos["X"] = lx; last_pos["Y"] = ly; last_pos["Z"] = lz
 
                     elif line.startswith("MOVEABS"):
-                        flush_moveabs_buffer()
+                        # No flush here: buffered MOVEABS runs must stay intact so
+                        # the full-circle fit (try_arc_fit) can see >=8 points.
+                        # The non-buffered path flushes below.
                         flush_spindle()
                         c      = parse_coord(line)
                         target = last_pos.copy()

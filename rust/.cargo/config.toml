@@ -1,0 +1,6 @@
+# Rust's gnu target needs an external dlltool (raw-dylib import libs); the
+# rustup-bundled one is unusable alone. mingw-w64 bin must be on PATH.
+# Keeping the linker self-contained stops that same PATH entry from hijacking
+# the link step (mingw gcc as linker breaks on this host).
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-self-contained=yes"]

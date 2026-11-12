@@ -6,3 +6,5 @@ Spindle: 1200 RPM (deferred until first Z retract)
 Warning: zero-radius arc skipped on line [CCWABS X20000 Y20000 I20000 J20000]
 Warning: Could not parse VEL from: VEL
 Spindle: 1800 RPM (deferred until first Z retract)
+  Arc fit: full circle ø20.00mm → G3 R10.000 (two semicircles)
+Arc fitting summary: 1 circle(s) converted to G2/G3, 0 segment group(s) left as G1

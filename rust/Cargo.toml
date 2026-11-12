@@ -1,0 +1,23 @@
+[package]
+name = "isel-to-gcode"
+version = "2.1.0"
+edition = "2024"
+
+[lib]
+name = "isel_to_gcode"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ISEL_to_Gcode"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.37.0"
+image = { version = "0.25.10", default-features = false, features = ["ico"] }
+regex = "1.13.1"
+rfd = "0.18.0"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
