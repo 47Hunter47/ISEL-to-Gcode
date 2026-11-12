@@ -1,0 +1,12 @@
+graphify-out/
+graph_update.log
+.codegraph/
+AGENTS.md
+__pycache__/
+*.pyc
+dist/
+build/
+.version
+*.spec
+rust/target/
+.superpowers/
