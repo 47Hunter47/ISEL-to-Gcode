@@ -350,7 +350,52 @@ pub fn run() {
 
 /// `prefill` seeds the input path — set when the exe is launched with a file
 /// argument (Windows "Open with" / drag onto the exe).
+/// First thing `run_with` does. Lets us tell "the exe never ran" (SmartScreen /
+/// AV quarantine) apart from "it ran and failed to open a window".
+fn startup_log(line: &str) {
+    use std::io::Write;
+    let path = std::env::temp_dir().join("ISEL_to_Gcode_startup.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(
+            f,
+            "{} {}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            line
+        );
+    }
+}
+
+// A GUI-subsystem exe has no console: without this, a panic in release leaves
+// no trace at all.
+fn show_error(text: &str) {
+    rfd::MessageDialog::new()
+        .set_title("ISEL to G-code")
+        .set_description(text)
+        .show();
+}
+
 pub fn run_with(prefill: Option<String>) {
+    startup_log(&format!(
+        "started v{} exe={:?} prefill={:?}",
+        APP_VERSION,
+        std::env::current_exe(),
+        prefill
+    ));
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info.to_string();
+        startup_log(&format!("PANIC {msg}"));
+        show_error(&format!(
+            "A problem occurred:\n\n{msg}\n\nDetails: %TEMP%\\ISEL_to_Gcode_startup.log"
+        ));
+    }));
+
     let icon = image::load_from_memory(include_bytes!("../assets/icon.ico"))
         .ok()
         .map(|img| {
@@ -362,32 +407,47 @@ pub fn run_with(prefill: Option<String>) {
                 height: h,
             }
         });
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([520.0, 620.0])
-        .with_title(format!("ISEL \u{2192} G-code Converter v{}", APP_VERSION));
-    if let Some(icon) = icon {
-        viewport = viewport.with_icon(icon);
+
+    // eframe's default renderer is wgpu (DirectX); glow (OpenGL) is tried if it
+    // fails, since a broken/absent graphics driver is the usual cause of a
+    // window that never appears.
+    for renderer in [eframe::Renderer::Wgpu, eframe::Renderer::Glow] {
+        let mut viewport = egui::ViewportBuilder::default()
+            .with_inner_size([520.0, 620.0])
+            .with_title(format!("ISEL \u{2192} G-code Converter v{}", APP_VERSION));
+        if let Some(icon) = icon.clone() {
+            viewport = viewport.with_icon(icon);
+        }
+        let options = eframe::NativeOptions {
+            viewport,
+            renderer,
+            ..Default::default()
+        };
+        let prefill = prefill.clone();
+        match eframe::run_native(
+            "ISEL to G-code Converter",
+            options,
+            Box::new(move |cc| {
+                let mut visuals = egui::Visuals::dark();
+                visuals.panel_fill = BG;
+                visuals.window_fill = Color32::from_rgb(0x1e, 0x1e, 0x1e);
+                cc.egui_ctx.set_visuals(visuals);
+                let mut app = App::default();
+                if let Some(p) = prefill {
+                    app.input = p;
+                    app.push_log(format!("File selected: {}", app.input));
+                }
+                Ok(Box::new(app))
+            }),
+        ) {
+            Ok(()) => return,
+            Err(e) => startup_log(&format!("renderer {renderer:?} failed: {e}")),
+        }
     }
-    let options = eframe::NativeOptions {
-        viewport,
-        ..Default::default()
-    };
-    let _ = eframe::run_native(
-        "ISEL to G-code Converter",
-        options,
-        Box::new(move |cc| {
-            let mut visuals = egui::Visuals::dark();
-            visuals.panel_fill = BG;
-            visuals.window_fill = Color32::from_rgb(0x1e, 0x1e, 0x1e);
-            cc.egui_ctx.set_visuals(visuals);
-            let mut app = App::default();
-            if let Some(p) = prefill {
-                app.input = p;
-                app.push_log(format!("File selected: {}", app.input));
-            }
-            Ok(Box::new(app))
-        }),
+    show_error(
+        "Could not open a window.\n\nDetails: %TEMP%\\ISEL_to_Gcode_startup.log",
     );
+    std::process::exit(1);
 }
 
 // GUI state machine tests: no window needed, everything is channel + field state.

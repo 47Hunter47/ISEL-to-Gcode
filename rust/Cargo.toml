@@ -12,7 +12,9 @@ name = "ISEL_to_Gcode"
 path = "src/main.rs"
 
 [dependencies]
-eframe = "0.37.0"
+# glow (OpenGL) is enabled as a fallback renderer for machines where wgpu's
+# DirectX context can't be created (older/limited GPU drivers).
+eframe = { version = "0.37.0", features = ["glow"] }
 egui = "0.37.0"
 image = { version = "0.25.10", default-features = false, features = ["ico"] }
 regex = "1.13.1"
