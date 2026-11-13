@@ -131,78 +131,93 @@ impl Preview {
         out
     }
 
+    /// A real OS window: an `egui::Window` is clipped to the main window and cannot
+    /// be dragged outside it. Backends without multiple viewports fall back to an
+    /// embedded window, which is the previous behaviour.
     pub fn show(&mut self, ctx: &egui::Context) {
         let mut open = self.open;
         let title = format!("Path Preview \u{2014} {}", self.title);
-        egui::Window::new(title)
-            .open(&mut open)
-            .default_size([960.0, 720.0])
-            .resizable(true)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("PATH PREVIEW").strong());
-                    let mut legend = |color: Color32, name: &str| {
-                        ui.label(RichText::new("\u{2501}\u{2501}").color(color).monospace());
-                        ui.label(name);
-                    };
-                    legend(COLOR_CUT, "CUT");
-                    legend(COLOR_ARC, "ARC");
-                    legend(COLOR_RAPID, "RAPID");
-                    let b = &self.data.bounds;
-                    ui.label(
-                        RichText::new(format!(
-                            "   {} cut  {} arc  {} rapid   W:{:.1}  H:{:.1} mm",
-                            thousands(self.data.counts.cut),
-                            thousands(self.data.counts.arc),
-                            thousands(self.data.counts.rapid),
-                            b.max_x - b.min_x,
-                            b.max_y - b.min_y
-                        ))
-                        .monospace()
-                        .color(theme::TEXT_WEAK),
-                    );
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("FIT").clicked() {
-                        self.last_rect = Rect::NOTHING;
-                    }
-                    ui.checkbox(&mut self.iso, "Isometric");
-                });
-
-                let avail = ui.available_size();
-                let (response, painter) = ui.allocate_painter(avail, Sense::click_and_drag());
-                let rect = response.rect;
-                painter.rect_filled(rect, 0.0, COLOR_BG);
-
-                if self.last_rect != rect {
-                    self.fit(rect);
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("path_preview"),
+            egui::ViewportBuilder::default()
+                .with_title(title)
+                .with_inner_size([960.0, 720.0])
+                .with_resizable(true),
+            |ui, _class| {
+                // the OS title-bar X asks us to close: stop showing the viewport next pass
+                if ui.input(|i| i.viewport().close_requested()) {
+                    open = false;
                 }
+                egui::Frame::new()
+                    .fill(theme::PANEL)
+                    .inner_margin(10.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("PATH PREVIEW").strong());
+                            let mut legend = |color: Color32, name: &str| {
+                                ui.label(RichText::new("\u{2501}\u{2501}").color(color).monospace());
+                                ui.label(name);
+                            };
+                            legend(COLOR_CUT, "CUT");
+                            legend(COLOR_ARC, "ARC");
+                            legend(COLOR_RAPID, "RAPID");
+                            let b = &self.data.bounds;
+                            ui.label(
+                                RichText::new(format!(
+                                    "   {} cut  {} arc  {} rapid   W:{:.1}  H:{:.1} mm",
+                                    thousands(self.data.counts.cut),
+                                    thousands(self.data.counts.arc),
+                                    thousands(self.data.counts.rapid),
+                                    b.max_x - b.min_x,
+                                    b.max_y - b.min_y
+                                ))
+                                .monospace()
+                                .color(theme::TEXT_WEAK),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            if ui.button("FIT").clicked() {
+                                self.last_rect = Rect::NOTHING;
+                            }
+                            ui.checkbox(&mut self.iso, "Isometric");
+                        });
 
-                if response.dragged() {
-                    let d = response.drag_delta();
-                    self.ox += d.x;
-                    self.oy += d.y;
-                }
-                if response.hovered() {
-                    // python: wheel up = zoom in. egui's scroll delta is positive downward.
-                    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-                    if scroll != 0.0 {
-                        if let Some(c) = response.hover_pos() {
-                            let factor = if scroll > 0.0 { 1.0 / 1.15 } else { 1.15 };
-                            self.zoom_at(c, factor);
+                        let avail = ui.available_size();
+                        let (response, painter) = ui.allocate_painter(avail, Sense::click_and_drag());
+                        let rect = response.rect;
+                        painter.rect_filled(rect, 0.0, COLOR_BG);
+
+                        if self.last_rect != rect {
+                            self.fit(rect);
                         }
-                    }
-                }
 
-                if !self.iso {
-                    self.draw_grid(&painter, rect);
-                }
+                        if response.dragged() {
+                            let d = response.drag_delta();
+                            self.ox += d.x;
+                            self.oy += d.y;
+                        }
+                        if response.hovered() {
+                            // python: wheel up = zoom in. egui's scroll delta is positive downward.
+                            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                            if scroll != 0.0 {
+                                if let Some(c) = response.hover_pos() {
+                                    let factor = if scroll > 0.0 { 1.0 / 1.15 } else { 1.15 };
+                                    self.zoom_at(c, factor);
+                                }
+                            }
+                        }
 
-                // draw order: rapid -> cut -> arc (arc on top so circles show)
-                for (line, color) in self.scene() {
-                    painter.line(line, Stroke::new(1.0, color));
-                }
-            });
+                        if !self.iso {
+                            self.draw_grid(&painter, rect);
+                        }
+
+                        // draw order: rapid -> cut -> arc (arc on top so circles show)
+                        for (line, color) in self.scene() {
+                            painter.line(line, Stroke::new(1.0, color));
+                        }
+                    });
+            },
+        );
         self.open = open;
     }
 

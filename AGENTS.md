@@ -36,6 +36,12 @@ Durum, açık işler, bug geçmişi ve test sonuçları burada değil Obsidian n
   yolu, checkbox) aksi halde geri sızıyor.
 - Penceresiz makinede arayüz kanıtı: `ISEL_SHOT=yol.bmp` değişkeniyle uygulama tek kare ekran görüntüsü
   yazıp çıkar. BMP yazıcısının kanal/satır sırasını `app::tests::shot_bmp_is_bottom_up_bgr` korur.
+- Exe dosya ikonu `rust/build.rs`'in `windres` ile gömdüğü Win32 kaynağından gelir (`assets/icon.ico`);
+  `with_icon` yalnız canlı pencereyi boyar. `windres` PATH'te olmalı (yerelde w64devkit, CI'da `C:\mingw64`) —
+  yoksa build.rs bilerek düşer, ikonsuz exe sessizce yayınlanmaz.
+- Önizleme penceresi ayrı bir OS penceresidir (`show_viewport_immediate`); `egui::Window`'a geri döndürme,
+  pencere ana pencerenin içine kıstırılır. Başsız kanıt: `ISEL_PREVIEW=<out.ngc>` önizlemeyi açılışta açar,
+  `EnumWindows` ile ikinci üst-düzey pencere görülür.
 - `.gitattributes` içindeki `.ngc`/`.isel`/`.ncp` CRLF pinlerini koru.
 - Kod değişikliğinden sonra codegraph'ı `sync` ile tazele.
 
@@ -46,6 +52,7 @@ Durum, açık işler, bug geçmişi ve test sonuçları burada değil Obsidian n
 - Sentetik fixture golden'larını (`sample_expected.*`) silme; gerçek programların girmediği yolları
   (VEL yokken varsayılan ilerleme, R yayları, sıfır uzunluk koruması) onlar kapsar.
 - `graphify-out/`, `graph_update.log`, `.codegraph/`, `rust/target/` commit edilmez.
+- `cargo fmt` çalıştırma: kod elle biçimli, rustfmt tüm ağacı yeniden yazar ve gerçek değişikliği gömer.
 - Bu projede subagent kullanma.
 
 ## Kod Grafiği (graphify) — OTOMATİK KULLANIM

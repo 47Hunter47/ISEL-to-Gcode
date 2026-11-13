@@ -566,6 +566,17 @@ pub fn run_with(prefill: Option<String>) {
                     app.input = p;
                     app.push_log(format!("File selected: {}", app.input));
                 }
+                // ISEL_PREVIEW=<out.ngc>: open the path preview at startup, so a machine
+                // with no usable desktop can prove the preview is its own OS window.
+                if let Some(p) = std::env::var_os("ISEL_PREVIEW") {
+                    app.last_output = Some(PathBuf::from(p).to_string_lossy().into_owned());
+                    app.open_preview();
+                    startup_log(&format!(
+                        "ISEL_PREVIEW={:?} preview_open={}",
+                        app.last_output.as_deref().unwrap_or(""),
+                        app.preview.is_some()
+                    ));
+                }
                 startup_log("app creator finished");
                 Ok(Box::new(app))
             }),
