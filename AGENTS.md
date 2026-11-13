@@ -31,6 +31,11 @@ Durum, açık işler, bug geçmişi ve test sonuçları burada değil Obsidian n
 - Başlangıç günlüğünü (`%TEMP%\ISEL_to_Gcode_startup.log`), panic hook'unu ve hata kutusunu koru;
   pencere açılmayan bir makinede tek kanıt bunlar.
 - Render sırası Glow (OpenGL) önce, wgpu yedek; `ISEL_RENDERER=glow|wgpu` ile geçici olarak değiştirilir.
+- Renkleri tek yerden ver: `src/theme.rs`. Widget'ları elle boyama; `theme::apply()` hem Dark hem Light
+  kovasına yazar ve tema tercihini sabitler — Windows light modunda egui'nin beyaz varsayılanları (progress
+  yolu, checkbox) aksi halde geri sızıyor.
+- Penceresiz makinede arayüz kanıtı: `ISEL_SHOT=yol.bmp` değişkeniyle uygulama tek kare ekran görüntüsü
+  yazıp çıkar. BMP yazıcısının kanal/satır sırasını `app::tests::shot_bmp_is_bottom_up_bgr` korur.
 - `.gitattributes` içindeki `.ngc`/`.isel`/`.ncp` CRLF pinlerini koru.
 - Kod değişikliğinden sonra codegraph'ı `sync` ile tazele.
 
