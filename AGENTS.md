@@ -17,7 +17,7 @@ Durum, açık işler, bug geçmişi ve test sonuçları burada değil Obsidian n
 ## Komutlar
 - Yerel derleme/test: `export PATH="$HOME/tools/w64devkit/bin:$PATH"; cd rust && cargo test && cargo build --release`
 - Windows GNU yalnız. `rust/.cargo/config.toml` içindeki `-C link-self-contained=yes` korunur.
-- CLI: `ISEL_to_Gcode.exe convert <in.isel> <out.ngc> [--arcs]` — bayraklar iki yoldan sonra gelir.
+- CLI: `ISEL_to_Gcode.exe convert <in.isel> <out.ngc> [--arcs] [--corners]` — bayraklar iki yoldan sonra gelir.
 - Release: `rust/Cargo.toml` içindeki `version` tek sürüm kaynağı; commit → `git tag -a vX.Y.Z` → etiketi
   push → `gh release create vX.Y.Z`. Yalnızca *yayınlanan* release CI derlemesini tetikler ve
   `ISEL_to_Gcode.exe`'i release'e ekler.
@@ -43,9 +43,11 @@ Durum, açık işler, bug geçmişi ve test sonuçları burada değil Obsidian n
   pencere ana pencerenin içine kıstırılır. Başsız kanıt: `ISEL_PREVIEW=<out.ngc>` önizlemeyi açılışta açar,
   `EnumWindows` ile ikinci üst-düzey pencere görülür.
 - `.gitattributes` içindeki `.ngc`/`.isel`/`.ncp` CRLF pinlerini koru.
-- Kod değişikliğinden sonra codegraph'ı `sync` ile tazele.
+- Kod değişikliğinden sonra codegraph'ı `sync` ile tazele (`python -m graphify update .`).
 
 ## Yapma
+- Köşe feed azaltmada segment bölme, nokta ekleme/çıkarma, koordinat yuvarlama veya yol düzleştirme yapma;
+  yalnız mevcut G1 satırlarının F değeri ölçeklenir, seçenek kapalıyken çıktı bayt özdeş kalır.
 - Python/.NET/Electron katmanını geri getirme; teslim tek dosya exe, kurulum istemiyor.
 - Test geçsin diye golden'ı güncel Rust çıktısıyla üretme.
 - Yerel ya da CI derlemesini MSVC `link.exe`'ine geçirme; bu makinede çöküyor.
