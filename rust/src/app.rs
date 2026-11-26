@@ -40,6 +40,7 @@ fn status_color(s: &str) -> Color32 {
 pub struct App {
     input: String,
     use_arc: bool,
+    corner: bool,
     log: Vec<String>,
     progress: f32,
     status: String,
@@ -66,6 +67,7 @@ impl Default for App {
         App {
             input: String::new(),
             use_arc: false,
+            corner: false,
             log,
             progress: 0.0,
             status: "Ready".to_string(),
@@ -110,6 +112,7 @@ impl App {
         let out_path = out.to_string_lossy().into_owned();
 
         let arc = self.use_arc;
+        let corner = self.corner;
         self.converting = true;
         self.progress = 0.0;
         self.status = "Starting conversion...".to_string();
@@ -123,6 +126,14 @@ impl App {
                 "G2/G3 arc commands + full-circle detection (R format)"
             } else {
                 "G1 linearised"
+            }
+        ));
+        self.push_log(format!(
+            "Corners:  {}",
+            if corner {
+                "adaptive feed reduction (G1 only, geometry unchanged)"
+            } else {
+                "off"
             }
         ));
         self.push_log("--------------------------------------------------");
@@ -140,7 +151,7 @@ impl App {
                     let _ = tx_prog.send(Msg::Progress(p, t.to_string()));
                 },
             ));
-            match convert_file(&in_path, &out_path, arc, &mut log, &mut progress) {
+            match convert_file(&in_path, &out_path, arc, corner, &mut log, &mut progress) {
                 Ok(mins) => {
                     let _ = tx.send(Msg::Done(mins, out_path));
                 }
@@ -343,6 +354,10 @@ impl eframe::App for App {
                 ui.checkbox(
                     &mut self.use_arc,
                     "Use G2/G3 arc commands  (smaller file, requires arc-capable controller)",
+                );
+                ui.checkbox(
+                    &mut self.corner,
+                    "Corner Feed Reduction  (slower feed around sharp G1 corners)",
                 );
 
                 ui.add_space(6.0);

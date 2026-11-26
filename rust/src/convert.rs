@@ -228,6 +228,12 @@ pub struct Conv {
     buffer_start: Option<Pos>,
     arc_fit_converted: u32,
     arc_fit_skipped: u32,
+    /// Some(..) only when corner feed reduction is on: processed input line ->
+    /// relative feed factor. None keeps every code path on the original feed.
+    corner_factors: Option<HashMap<u64, f64>>,
+    /// Feed value last written to the file (as printed), so a reduced feed is
+    /// restored with one F line and never re-issued unchanged.
+    active_f: Option<String>,
 }
 
 impl Conv {
@@ -243,6 +249,8 @@ impl Conv {
             buffer_start: None,
             arc_fit_converted: 0,
             arc_fit_skipped: 0,
+            corner_factors: None,
+            active_f: None,
         }
     }
 
@@ -267,10 +275,27 @@ impl Conv {
         if self.current_feed.is_none() {
             self.current_feed = Some(DEFAULT_FEED);
             let line = self.nline() + &format!("F{:.0}", DEFAULT_FEED);
+            self.active_f = Some(format!("{:.0}", DEFAULT_FEED));
             log("Warning: No VEL found, using default F1000");
             return vec![line];
         }
         vec![]
+    }
+
+    /// Corner mode: F suffix that hands the base feed back to the controller on
+    /// the first line of a linearised arc, whose lines print no F of their own —
+    /// a reduced value left in force would slow the whole arc. A suffix, not a
+    /// line, so corner mode never changes the line numbering.
+    fn feed_restore_suffix(&mut self) -> Option<String> {
+        if self.corner_factors.is_none() {
+            return None;
+        }
+        let txt = format!("{:.0}", self.feed());
+        if self.active_f.as_deref() == Some(txt.as_str()) {
+            return None;
+        }
+        self.active_f = Some(txt.clone());
+        Some(format!(" F{}", txt))
     }
 
     /// python arc_to_g2g3(): single G2/G3 with R (negative R for spans > 180 deg).
@@ -448,6 +473,7 @@ pub fn convert_file(
     in_path: &str,
     out_path: &str,
     use_arc: bool,
+    corner: bool,
     log: &mut dyn FnMut(&str),
     progress: &mut Option<Box<dyn FnMut(f64, &str)>>,
 ) -> Result<f64, String> {
@@ -475,6 +501,28 @@ pub fn convert_file(
         p(0.0, "Reading file\u{2026}");
     }
 
+    // Corner feed reduction needs the whole XY toolpath before the first G-code
+    // line is written, so it is planned here. Off => nothing below changes.
+    // G2/G3 mode is excluded: arc fitting consumes points and rewrites motion,
+    // so the G1 corner geometry would no longer describe the emitted path.
+    let plan = if corner && use_arc {
+        log("Corner feed reduction: not applied in G2/G3 arc mode (G1 only)");
+        None
+    } else if corner {
+        if let Some(p) = progress {
+            p(0.0, "Analyzing corner geometry\u{2026}");
+        }
+        let plan = crate::corner::analyze(&text);
+        log(&format!(
+            "Corner feed reduction: {} corner(s), {} movement(s) at reduced feed",
+            plan.corners,
+            plan.factors.len()
+        ));
+        Some(plan.factors)
+    } else {
+        None
+    };
+
     let file = std::fs::File::create(out_path)
         .map_err(|e| format!("Cannot open output file for writing: {}", e))?;
     // python writes text mode on Windows => CRLF; goldens pin that.
@@ -488,6 +536,7 @@ pub fn convert_file(
     };
 
     let mut c = Conv::new(use_arc);
+    c.corner_factors = plan;
     let mut header = vec![];
     for kw in ["G21", "G17", "G40", "G49", "G90", "G94"] {
         header.push(c.nline() + kw);
@@ -601,14 +650,41 @@ pub fn convert_file(
                 if cc.contains_key(&'Z') {
                     cmd.push_str(&format!(" Z{:.3}", target.z));
                 }
-                batch.push(c.nline() + &cmd);
                 let feed = c.feed();
+                let d = ((target.x - c.last_pos.x).powi(2)
+                    + (target.y - c.last_pos.y).powi(2)
+                    + (target.z - c.last_pos.z).powi(2))
+                .sqrt();
+                // Corner mode: this movement may run at a reduced feed. F is written
+                // only when the commanded value changes, so straight runs and
+                // restored sections carry no extra F commands. Coordinates are
+                // untouched — the factor only scales the feed.
+                let mut eff = feed;
+                if let Some(factors) = &c.corner_factors {
+                    let f = factors.get(&processed).copied().unwrap_or(1.0);
+                    if d > 0.0 {
+                        // 1.0 restores the VEL feed, so a reduced value never leaks
+                        // past the corner's influence region.
+                        let txt = if f < 1.0 {
+                            format!("{:.0}", feed * f)
+                        } else {
+                            format!("{:.0}", feed)
+                        };
+                        if c.active_f.as_deref() != Some(txt.as_str()) {
+                            cmd.push_str(&format!(" F{}", txt));
+                            c.active_f = Some(txt.clone());
+                        }
+                        // The machine runs the printed value, so the estimate uses it.
+                        // An unreduced line keeps the exact feed: with no corner at
+                        // all, corner mode then reports the original converter's time.
+                        if f < 1.0 {
+                            eff = txt.parse().unwrap_or(feed);
+                        }
+                    }
+                }
+                batch.push(c.nline() + &cmd);
                 if feed != 0.0 {
-                    let d = ((target.x - c.last_pos.x).powi(2)
-                        + (target.y - c.last_pos.y).powi(2)
-                        + (target.z - c.last_pos.z).powi(2))
-                    .sqrt();
-                    c.total_time_min += d / feed;
+                    c.total_time_min += d / eff;
                 }
                 c.last_pos = target;
             }
@@ -619,6 +695,7 @@ pub fn convert_file(
                 Some(cap) => {
                     let f = cap[1].parse::<f64>().unwrap_or(0.0) / VEL_RATIO;
                     c.current_feed = Some(f);
+                    c.active_f = Some(format!("{:.0}", f));
                     batch.push(c.nline() + &format!("F{:.0}", f));
                     log(&format!("Feed: F{:.0}", f));
                 }
@@ -653,7 +730,14 @@ pub fn convert_file(
                 if c.use_arc {
                     batch.extend(c.arc_to_g2g3(c.last_pos, end, center, cw));
                 } else {
-                    batch.extend(c.linearize_arc(c.last_pos, end, center, cw));
+                    // linearize_arc prints no F of its own: hand the base feed back
+                    // to the controller if a corner left a reduced value in force.
+                    let restore = c.feed_restore_suffix();
+                    let mut lines = c.linearize_arc(c.last_pos, end, center, cw);
+                    if let (Some(sfx), Some(first)) = (restore, lines.first_mut()) {
+                        first.push_str(&sfx);
+                    }
+                    batch.extend(lines);
                 }
                 c.last_pos = end;
             }

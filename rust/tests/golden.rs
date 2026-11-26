@@ -9,7 +9,7 @@ fn run_golden(arc: bool, tag: &str) {
     let out = std::env::temp_dir().join(format!("isel_golden_{}_{}.ngc", tag, std::process::id()));
     let mut logs: Vec<String> = vec![];
     let mut none: Option<Box<dyn FnMut(f64, &str)>> = None;
-    let t = convert_file(&inp, out.to_str().unwrap(), arc, &mut |m: &str| logs.push(m.to_string()), &mut none)
+    let t = convert_file(&inp, out.to_str().unwrap(), arc, false, &mut |m: &str| logs.push(m.to_string()), &mut none)
         .unwrap_or_else(|e| panic!("convert failed: {}", e));
 
     let got_ngc = std::fs::read(&out).unwrap();

@@ -39,7 +39,7 @@ fn run(text: &str, arc: bool) -> (String, Vec<String>, f64) {
     std::fs::write(&inp, text).unwrap();
     let mut logs: Vec<String> = vec![];
     let mut none: Option<Box<dyn FnMut(f64, &str)>> = None;
-    let r = convert_file(inp.to_str().unwrap(), outp.to_str().unwrap(), arc,
+    let r = convert_file(inp.to_str().unwrap(), outp.to_str().unwrap(), arc, false,
                          &mut |m: &str| logs.push(m.to_string()), &mut none);
     // ngc comes back CRLF (python writes text-mode on Windows); tests compare logical lines
     let ngc = std::fs::read_to_string(&outp).unwrap_or_default();
@@ -52,7 +52,7 @@ fn run(text: &str, arc: bool) -> (String, Vec<String>, f64) {
     let inp = dir.join("isel_t_empty.isel"); let outp = dir.join("isel_t_eo.ngc");
     std::fs::write(&inp, "; only a comment\n\n").unwrap();
     let mut none: Option<Box<dyn FnMut(f64, &str)>> = None;
-    let r = convert_file(inp.to_str().unwrap(), outp.to_str().unwrap(), false,
+    let r = convert_file(inp.to_str().unwrap(), outp.to_str().unwrap(), false, false,
                          &mut |_: &str| {}, &mut none);
     assert_eq!(r.unwrap_err(), "Input file contains no processable commands.");
 }
