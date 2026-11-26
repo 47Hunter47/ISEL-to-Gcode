@@ -4,8 +4,12 @@ name: CodeQL
 # 26.11.2026: 422 on PATCH) AND it rejects SARIF from custom workflows while
 # enabled ("CodeQL analyses from advanced configurations cannot be processed
 # when the default setup is enabled", measured 26.11.2026). So default setup
-# is off and this file analyzes everything the old default setup covered,
-# plus Rust, in one job.
+# is off and this file covers everything the old default setup scanned, plus
+# Rust — as one matrix entry per language, which is also how default setup
+# organizes it (measured 26.11.2026: a single job clustering four languages
+# failed in the actions database finalize and skipped the other three
+# analyze steps; the actions trace only lands after the job's post steps,
+# too late for a mid-job finalize).
 
 on:
   push:
@@ -23,42 +27,48 @@ permissions:
 jobs:
   analyze:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: rust
+            category: /language:rust
+            needs_build: rust   # dist first: the tauri build script embeds it
+          - language: c-cpp
+            category: /language:c-cpp
+            needs_build: rust   # the same cargo trace carries the cc calls
+          - language: javascript-typescript
+            category: /language:javascript-typescript
+            needs_build: npm
+          - language: actions
+            category: /language:actions
+            needs_build: none
     steps:
       - uses: actions/checkout@v5
 
-      # init must run before the steps to analyze: the actions extractor only
-      # traces action invocations that execute after init (advanced mode;
-      # measured: with late init the actions database is empty and analyze
-      # fails with exit 32 "could not process any of it")
       - uses: github/codeql-action/init@v3
         with:
-          languages: rust, javascript-typescript, actions, c-cpp
+          languages: ${{ matrix.language }}
 
-      - run: rustup toolchain install stable-x86_64-pc-windows-gnu --no-self-update --profile minimal
-      - run: echo "C:\\mingw64\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      # dist/ must exist: the tauri build script embeds it and fails the
-      # traced build without it (same order as CI's build job)
       - uses: actions/setup-node@v7
+        if: matrix.needs_build != 'none'
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-      - run: npm run build
+      - if: matrix.needs_build != 'none'
+        run: npm ci
+      - if: matrix.needs_build != 'none'
+        run: npm run build
 
+      - if: matrix.needs_build == 'rust'
+        run: rustup toolchain install stable-x86_64-pc-windows-gnu --no-self-update --profile minimal
+      - if: matrix.needs_build == 'rust'
+        run: echo "C:\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: traced build
+        if: matrix.needs_build == 'rust'
         run: cargo build
         working-directory: src-tauri
 
       - uses: github/codeql-action/analyze@v3
         with:
-          category: "/language:rust"
-      - uses: github/codeql-action/analyze@v3
-        with:
-          category: "/language:javascript-typescript"
-      - uses: github/codeql-action/analyze@v3
-        with:
-          category: "/language:actions"
-      - uses: github/codeql-action/analyze@v3
-        with:
-          category: "/language:c-cpp"
+          category: "${{ matrix.category }}"
