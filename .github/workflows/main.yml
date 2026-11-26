@@ -95,7 +95,7 @@ jobs:
         run: cargo test
 
       - if: steps.check.outputs.skip != 'true'
-        run: cargo build --release
+        run: cargo build --release --features custom-protocol
 
       - name: Upload EXE
         if: steps.check.outputs.skip != 'true'

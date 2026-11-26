@@ -63,11 +63,13 @@ Windows the GNU binutils that toolchain needs for linking (MSYS2/WinLibs or
 npm install
 npm run build
 cd src-tauri
-cargo build --release
+cargo build --release --features custom-protocol
 ```
 
-`cargo build --release` embeds the built UI into the exe, so the result stays a
-single file in `src-tauri/target/release/`. The same executable also runs
+`cargo build --release --features custom-protocol` embeds the built UI into the exe,
+so the result stays a single file in `src-tauri/target/release/`. (Built without that
+feature the exe looks for a dev server at `localhost:1420` instead and shows an empty
+"page not found" window.) The same executable also runs
 without the window for scripting: `ISEL_to_Gcode.exe convert in.isel out.ngc [--arcs] [--corners]`
 (flags come after the two paths; `--corners` enables corner feed reduction).
 
