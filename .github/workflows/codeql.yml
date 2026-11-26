@@ -1,15 +1,19 @@
-name: CodeQL (Rust)
+name: CodeQL
 
-# Code scanning default setup cannot select Rust (its language enum lacks
-# `rust` — measured 2026-11-26: 422 "rust is not a possible value"), so the
-# Rust half of the codebase is scanned by this manual workflow. It coexists
-# with default setup, which keeps analyzing actions + JS/TS.
+# Default setup cannot analyze Rust (its language enum lacks `rust`, measured
+# 26.11.2026: 422 on PATCH) AND it rejects SARIF from custom workflows while
+# enabled ("CodeQL analyses from advanced configurations cannot be processed
+# when the default setup is enabled", measured 26.11.2026). So default setup
+# is off and this file analyzes everything the old default setup covered,
+# plus Rust, in one job.
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "30 3 * * 1" # weekly: analyses stay fresh even without pushes
 
 permissions:
   security-events: write
@@ -36,7 +40,7 @@ jobs:
 
       - uses: github/codeql-action/init@v3
         with:
-          languages: rust
+          languages: rust, javascript-typescript, actions, c-cpp
 
       - name: traced build
         run: cargo build
@@ -45,3 +49,12 @@ jobs:
       - uses: github/codeql-action/analyze@v3
         with:
           category: "/language:rust"
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript-typescript"
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:actions"
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:c-cpp"
