@@ -5,6 +5,12 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # Dependabot's Linux VM has no windows-gnu triple installed; the pinned
+    # triple in rust-toolchain.toml would make every cargo update fail with
+    # "target tuple in channel name" (measured: 26.11.2026). The env override
+    # wins over the file and cargo version resolution only needs plain stable.
+    env:
+      RUSTUP_TOOLCHAIN: stable
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
