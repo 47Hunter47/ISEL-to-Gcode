@@ -42,10 +42,28 @@ const SPIKE_RATIO: f64 = 1.7;
 /// Reductions smaller than this are not worth an F command: they would litter
 /// the file (and the machine) with 1 % feed steps.
 const MIN_REDUCTION: f64 = 0.01;
-/// Classification grid. The machine resolves 0.01 mm and the CAM rounds its own
-/// coordinates to 0.001 mm, so anything finer is generator noise, not geometry.
+/// Classification grid. Both the CAM's own coordinate rounding (0.001 mm) and the
+/// cutter's practical resolution are far below this, so 0.01 mm is used as the
+/// noise floor for classification — not as a claim about machine resolution.
 /// Used for the analysis only — the emitted coordinates are untouched.
 const SNAP_MM: f64 = 0.01;
+/// A curved section at or above this radius keeps full feed; below it the feed
+/// follows `sqrt(r / ARC_FULL_RADIUS_MM)`. That square root is the shape of an
+/// acceleration limit (v = sqrt(a·r)) but the machine's acceleration is unknown,
+/// so the radius where full feed is still reachable is a policy constant, not a
+/// machine parameter. It makes a tight rounded U-turn slow (r=0.6 mm -> 27 %) and
+/// a broad one keep speed (r=50 mm -> 100 %).
+const ARC_FULL_RADIUS_MM: f64 = 8.0;
+
+/// Feed factor for a curved section of radius `r`: never above 1, never below the
+/// sharpest stop of the angle profile.
+fn radius_factor(r: f64) -> f64 {
+    if r >= ARC_FULL_RADIUS_MM {
+        1.0
+    } else {
+        (r / ARC_FULL_RADIUS_MM).sqrt().clamp(0.25, 1.0)
+    }
+}
 
 /// Direction change (degrees) -> feed factor. 0 = straight, 180 = reversal.
 /// Values below 10° are treated as noise, hence the flat 100 % head.
@@ -143,6 +161,15 @@ impl Path {
             return 0.0; // no direction on one side: run end or a degenerate point
         }
         (ax * by - ay * bx).atan2(ax * bx + ay * by).to_degrees()
+    }
+
+    /// Heading (degrees) at arc length `s`, over a short chord. The difference
+    /// between two headings is the turn of the path between them — counted once,
+    /// unlike summing per-vertex window turns, whose windows overlap.
+    fn heading(&self, s: f64) -> f64 {
+        let b = self.at(s - WINDOW_MM);
+        let a = self.at(s + WINDOW_MM);
+        (a.1 - b.1).atan2(a.0 - b.0).to_degrees()
     }
 }
 
@@ -251,7 +278,21 @@ impl Group {
             }
             let end = i;
             let mean = (start..=end).map(|k| t[k].abs()).sum::<f64>() / (end - start + 1) as f64;
-            let f = factor_for(mean);
+            // Two views of the same section: how sharp each window step is (the
+            // angle profile), and how tight the whole turn is. The section's total
+            // turn is the difference of its end headings — summing the per-vertex
+            // window turns would count the same degrees three times over, since
+            // those windows overlap.
+            let len = p.cum[end] - p.cum[start];
+            let mut total = p.heading(p.cum[end]) - p.heading(p.cum[start]);
+            total = ((total + 180.0).rem_euclid(360.0)) - 180.0;
+            let total = total.abs();
+            let r = if total > 1e-6 { len / total.to_radians() } else { f64::INFINITY };
+            // A curve never runs slower than a sharp corner that turns the same
+            // total amount: rounding a corner must not make it slower than the
+            // corner it replaced (a 90 deg turn spread over 0.1 mm steps is still
+            // a 90 deg corner, and reads 0.40 here, not the radius floor).
+            let f = factor_for(total).max(factor_for(mean).min(radius_factor(r)));
             if f < 1.0 - MIN_REDUCTION {
                 plan.arcs += 1;
                 // The run's own segments, plus the one segment on each side that
@@ -308,24 +349,43 @@ pub fn analyze(text: &str) -> CornerPlan {
                 cc.get(&'X').copied().unwrap_or(last.0),
                 cc.get(&'Y').copied().unwrap_or(last.1),
             );
-            if cc.contains_key(&'X') || cc.contains_key(&'Y') {
+            let xy_moved =
+                (target.0 - last.0).abs() > TOL_MM || (target.1 - last.1).abs() > TOL_MM;
+            if xy_moved {
                 group.push(last, target, processed);
-            } else {
-                // Pure Z (or empty) MOVEABS: not a cutting segment, ends the run.
+            } else if cc.contains_key(&'Z') {
+                // X/Y repeated with only Z moving: that is a plunge, not a zero
+                // length cut. It must never inherit a corner feed (the converter
+                // times it in 3D), so the run ends here.
                 group.flush(&mut plan);
             }
+            // A duplicate point with no Z change is neither: it is skipped and the
+            // run continues, so it cannot break a corner in two.
             last = target;
         } else if line.starts_with("CWABS") || line.starts_with("CCWABS") {
-            // Arcs are excluded from corner analysis; their end point becomes the
-            // start of the next run.
+            // An arc is one input line but many G1 moves in linearised output, so
+            // it gets a single factor of its own, keyed by that line: a tight
+            // rounded U-turn must slow down even in G1 mode.
             group.flush(&mut plan);
             let cc = parse_coord(line, &['X', 'Y', 'Z']);
-            if let Some(v) = cc.get(&'X') {
-                last.0 = *v;
+            let ij = parse_coord(line, &['I', 'J']);
+            let end = (
+                cc.get(&'X').copied().unwrap_or(last.0),
+                cc.get(&'Y').copied().unwrap_or(last.1),
+            );
+            let center = (
+                ij.get(&'I').copied().unwrap_or(0.0),
+                ij.get(&'J').copied().unwrap_or(0.0),
+            );
+            let r = (last.0 - center.0).hypot(last.1 - center.1);
+            if r > TOL_MM {
+                let f = radius_factor(r);
+                if f < 1.0 - MIN_REDUCTION {
+                    plan.factors.insert(processed, f);
+                    plan.arcs += 1;
+                }
             }
-            if let Some(v) = cc.get(&'Y') {
-                last.1 = *v;
-            }
+            last = end;
         } else if line.starts_with("SPINDLE CW") {
             group.flush(&mut plan);
         } else if line.starts_with("VEL") {

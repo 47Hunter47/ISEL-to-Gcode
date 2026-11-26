@@ -282,22 +282,6 @@ impl Conv {
         vec![]
     }
 
-    /// Corner mode: F suffix that hands the base feed back to the controller on
-    /// the first line of a linearised arc, whose lines print no F of their own —
-    /// a reduced value left in force would slow the whole arc. A suffix, not a
-    /// line, so corner mode never changes the line numbering.
-    fn feed_restore_suffix(&mut self) -> Option<String> {
-        if self.corner_factors.is_none() {
-            return None;
-        }
-        let txt = format!("{:.0}", self.feed());
-        if self.active_f.as_deref() == Some(txt.as_str()) {
-            return None;
-        }
-        self.active_f = Some(txt.clone());
-        Some(format!(" F{}", txt))
-    }
-
     /// python arc_to_g2g3(): single G2/G3 with R (negative R for spans > 180 deg).
     fn arc_to_g2g3(&mut self, start: Pos, end: Pos, center: Pos, cw: bool) -> Vec<String> {
         let (cx, cy) = (center.x, center.y);
@@ -362,7 +346,18 @@ impl Conv {
     }
 
     /// python linearize_arc_pure(): polyline at ARC_RESOLUTION mm steps.
-    fn linearize_arc(&mut self, start: Pos, end: Pos, center: Pos, cw: bool) -> Vec<String> {
+    /// `factor` is the corner plan's factor for this arc's input line (1.0 when
+    /// reduction is off): the whole polyline runs at that feed, and the F word is
+    /// printed on its first line only — an arc must not change feed step by step,
+    /// and its lines carry no F of their own in the original output.
+    fn linearize_arc(
+        &mut self,
+        start: Pos,
+        end: Pos,
+        center: Pos,
+        cw: bool,
+        factor: f64,
+    ) -> Vec<String> {
         let (cx, cy) = (center.x, center.y);
         let z = start.z;
         let r = (start.x - cx).hypot(start.y - cy);
@@ -378,24 +373,44 @@ impl Conv {
         let arc_len = (a1 - a0).abs() * r;
         let steps = ((arc_len / ARC_RESOLUTION) as i64).max(1);
         let da = (a1 - a0) / steps as f64;
-        let feed = self.feed();
+        let base = self.feed();
+        // The machine runs the printed value, so both the F word and the time
+        // estimate use the same rounded feed.
+        let mut eff = base;
+        let mut f_word = String::new();
+        if self.corner_factors.is_some() && base != 0.0 {
+            let txt = format!("{:.0}", base * factor);
+            if self.active_f.as_deref() != Some(txt.as_str()) {
+                f_word = format!(" F{}", txt);
+                self.active_f = Some(txt.clone());
+            }
+            eff = txt.parse().unwrap_or(base);
+        }
         let mut lines = Vec::with_capacity(steps as usize + 1);
         let (mut px, mut py) = (start.x, start.y);
         for i in 1..=steps {
             let a = a0 + da * i as f64;
             let tx = cx + r * a.cos();
             let ty = cy + r * a.sin();
-            lines.push(self.nline() + &format!("G1 X{:.3} Y{:.3} Z{:.3}", tx, ty, z));
-            if feed != 0.0 {
-                self.total_time_min += (tx - px).hypot(ty - py) / feed;
+            let mut code = format!("G1 X{:.3} Y{:.3} Z{:.3}", tx, ty, z);
+            if i == 1 {
+                code.push_str(&f_word);
+            }
+            lines.push(self.nline() + &code);
+            if base != 0.0 {
+                self.total_time_min += (tx - px).hypot(ty - py) / eff;
             }
             px = tx;
             py = ty;
         }
         if (end.x - px).abs() > 0.001 || (end.y - py).abs() > 0.001 {
-            lines.push(self.nline() + &format!("G1 X{:.3} Y{:.3} Z{:.3}", end.x, end.y, end.z));
-            if feed != 0.0 {
-                self.total_time_min += (end.x - px).hypot(end.y - py) / feed;
+            let mut code = format!("G1 X{:.3} Y{:.3} Z{:.3}", end.x, end.y, end.z);
+            if steps == 0 {
+                code.push_str(&f_word);
+            }
+            lines.push(self.nline() + &code);
+            if base != 0.0 {
+                self.total_time_min += (end.x - px).hypot(end.y - py) / eff;
             }
         }
         lines
@@ -662,7 +677,16 @@ pub fn convert_file(
                 // untouched — the factor only scales the feed.
                 let mut eff = feed;
                 if let Some(factors) = &c.corner_factors {
-                    let f = factors.get(&processed).copied().unwrap_or(1.0);
+                    // A move that only changes Z is never reduced: the geometry is
+                    // XY, and the time here is 3D, so a plunge would otherwise run
+                    // at a corner feed that belongs to the surrounding path.
+                    let xy_moved = (target.x - c.last_pos.x).abs() > 1e-9
+                        || (target.y - c.last_pos.y).abs() > 1e-9;
+                    let f = if xy_moved {
+                        factors.get(&processed).copied().unwrap_or(1.0)
+                    } else {
+                        1.0
+                    };
                     if d > 0.0 {
                         // 1.0 restores the VEL feed, so a reduced value never leaks
                         // past the corner's influence region.
@@ -731,14 +755,15 @@ pub fn convert_file(
                 if c.use_arc {
                     batch.extend(c.arc_to_g2g3(c.last_pos, end, center, cw));
                 } else {
-                    // linearize_arc prints no F of its own: hand the base feed back
-                    // to the controller if a corner left a reduced value in force.
-                    let restore = c.feed_restore_suffix();
-                    let mut lines = c.linearize_arc(c.last_pos, end, center, cw);
-                    if let (Some(sfx), Some(first)) = (restore, lines.first_mut()) {
-                        first.push_str(&sfx);
-                    }
-                    batch.extend(lines);
+                    // One factor for the whole arc: a tight rounded U-turn slows
+                    // down, a broad one keeps speed. 1.0 also restores the base
+                    // feed if a corner left a reduced value in force.
+                    let f = c
+                        .corner_factors
+                        .as_ref()
+                        .map(|m| m.get(&processed).copied().unwrap_or(1.0))
+                        .unwrap_or(1.0);
+                    batch.extend(c.linearize_arc(c.last_pos, end, center, cw, f));
                 }
                 c.last_pos = end;
             }

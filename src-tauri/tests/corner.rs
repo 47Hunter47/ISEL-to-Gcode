@@ -272,6 +272,8 @@ fn very_short_segments_still_form_a_corner() {
 
 #[test]
 fn zero_length_and_repeated_points_are_harmless() {
+    // A repeated point is the same corner again, and it gets no factor of its own:
+    // a line that does not move in XY must never be a carrier of a reduced feed.
     let p = analyze(&prog(&[
         (0.0, 0.0),
         (10.0, 0.0),
@@ -279,8 +281,9 @@ fn zero_length_and_repeated_points_are_harmless() {
         (10.0, 10.0),
     ]));
     assert_eq!(p.corners, 1, "the duplicate is the same corner, counted once");
-    assert_eq!(seg(&p, 0), seg(&p, 1));
-    assert!((seg(&p, 1) - 0.4).abs() < 0.02);
+    assert_eq!(seg(&p, 0), 0.4, "segment into the corner");
+    assert_eq!(seg(&p, 1), 1.0, "the duplicate line carries nothing");
+    assert_eq!(seg(&p, 2), 0.4, "segment out of the corner");
 
     let rr = analyze(&prog(&[(5.0, 5.0), (5.0, 5.0), (5.0, 5.0)]));
     assert!(rr.factors.is_empty());
@@ -387,6 +390,92 @@ fn xyz_motion_is_judged_on_the_xy_projection() {
 }
 
 #[test]
+fn repeated_xy_with_only_z_moving_is_never_a_corner_and_never_reduced() {
+    // The regression: X/Y repeated on the line but only Z moves. It used to be a
+    // zero-length XY segment that a nearby corner could hand a factor to, while
+    // the converter times the move in 3D — so the plunge ran at corner feed.
+    let text = "VEL 16667\nMOVEABS X0 Y0 Z0\nMOVEABS X100000 Y0 Z0\n\
+MOVEABS X100000 Y0 Z-500\nMOVEABS X100000 Y10000 Z-500\n";
+    let p = analyze(text);
+    assert_eq!(p.corners, 0, "the run ends at the plunge: {:?}", p.factors);
+    assert!(p.factors.is_empty());
+
+    let (on, _, _) = run(text, false, true);
+    let (off, _, _) = run(text, false, false);
+    assert_only_feeds_differ(&off, &on);
+    assert_eq!(on.matches(" F").count(), 1, "only the VEL F:\n{}", on);
+}
+
+#[test]
+fn short_segment_straight_line_keeps_full_feed() {
+    // 200 steps of 0.05 mm with a micrometre of wobble: dense, still straight
+    let pts: Vec<(f64, f64)> = (0..200)
+        .map(|i| (i as f64 * 0.05, if i % 3 == 0 { 0.001 } else { -0.001 }))
+        .collect();
+    let p = analyze(&prog(&pts));
+    assert_eq!(p.corners, 0);
+    assert!(p.arcs == 0, "no curved section either: {:?}", p.factors);
+}
+
+#[test]
+fn cwabs_and_ccwabs_are_analysed() {
+    // G1 mode linearises arcs; a tight rounded U-turn must slow down too.
+    // r = 0.5 mm: sqrt(0.5/8) = 0.25 (the floor).
+    let p = analyze("VEL 16667\nMOVEABS X0 Y0 Z-100\nCCWABS X1000 Y0 I500 J0\n");
+    let f = p.factors.values().copied().next().expect("the arc is reduced");
+    assert!((f - 0.25).abs() < 0.01, "tight arc factor {}", f);
+    assert_eq!(p.factors.len(), 1, "one factor for the whole arc");
+
+    // A broad arc keeps full feed: nothing to say.
+    let wide = analyze("VEL 16667\nMOVEABS X0 Y0 Z-100\nCCWABS X100000 Y0 I50000 J0\n");
+    assert!(wide.factors.is_empty(), "{:?}", wide.factors);
+}
+
+#[test]
+fn tight_rounded_u_turn_slows_more_than_a_wide_one() {
+    let u = |r: f64| {
+        // half circle of radius r, cut as a polyline: 60 segments
+        let n = 60;
+        let pts: Vec<(f64, f64)> = (0..=n)
+            .map(|i| {
+                let a = std::f64::consts::PI * i as f64 / n as f64;
+                (r * a.sin(), r * (1.0 - a.cos()))
+            })
+            .collect();
+        let p = analyze(&prog(&pts));
+        let f = p.factors.values().copied().fold(1.0f64, f64::min);
+        (p, f)
+    };
+    let (tight, ft) = u(1.5);
+    let (wide, fw) = u(40.0);
+    assert_eq!(tight.arcs, 1, "one curved section");
+    assert!(ft < 0.55, "tight r=1.5 U-turn at {}", ft);
+    // Wide enough that no 1 mm window turns more than the noise floor: nothing
+    // to reduce, which is the point (a broad U-turn keeps speed).
+    assert!(wide.factors.is_empty(), "{:?}", wide.factors);
+    assert_eq!(fw, 1.0);
+}
+
+#[test]
+fn a_curve_is_never_slower_than_the_corner_it_rounds() {
+    // Same 90 deg turn, three ways: sharp, rounded over 0.1 mm steps, rounded
+    // over 10 mm steps. Rounding must not make the machine slower than the
+    // sharp corner, so the sharp one is the floor.
+    let sharp = analyze(&prog(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]));
+    let fs = seg(&sharp, 0);
+    assert!((fs - 0.4).abs() < 0.02, "sharp 90 deg {}", fs);
+
+    let steps: Vec<(f64, f64)> = (0..=100).map(|i| (i as f64 * 0.1, 0.0)).collect();
+    let mut rounded = steps.clone();
+    rounded.extend((1..=100).map(|i| (10.0, i as f64 * 0.1)));
+    let fr = (96..=104)
+        .map(|s| seg(&analyze(&prog(&rounded)), s))
+        .fold(1.0f64, f64::min);
+    assert!(fr >= fs - 1e-9, "rounded {} slower than sharp {}", fr, fs);
+    assert!(fr < 0.9, "still slowed: {}", fr);
+}
+
+#[test]
 fn pure_z_line_never_carries_a_reduced_feed() {
     // right angle, then a plunge (Z only), then the next XY cut
     let text = "VEL 16667\nMOVEABS X0 Y0 Z0\nMOVEABS X10000 Y0 Z-100\n\
@@ -463,15 +552,21 @@ MOVEABS X10000 Y10000 Z-1000\nCWABS X20000 Y10000 I15000 J10000\n";
     let lines: Vec<&str> = on.lines().collect();
     let corner = lines.iter().position(|l| l.contains("Y10.000")).unwrap();
     assert_eq!(lines[corner - 1].matches(" F400").count(), 1, "corner line");
+    // The arc (r = 5 mm) now carries its own factor, sqrt(5/8) = 0.79, printed
+    // once on its first G1 line; the corner's F400 must not leak into it.
     let first_arc = lines[corner + 1];
     assert!(first_arc.contains(" G1 X"), "{}", first_arc);
     assert!(
-        first_arc.ends_with(&format!(" F{:.0}", FEED)),
-        "arc starts at the base feed: {}",
+        first_arc.ends_with(" F791"),
+        "arc runs at its own curvature feed: {}",
         first_arc
     );
-    // and only that one restore was needed
-    assert_eq!(on.matches(&format!(" F{:.0}", FEED)).count(), 2, "VEL + one restore");
+    assert_eq!(first_arc.matches(" F").count(), 1, "one F for the whole arc");
+    // every later arc line stays silent: the feed is already in force
+    assert!(
+        lines[corner + 2..].iter().take(20).all(|l| !l.contains(" F")),
+        "no F per arc step"
+    );
 }
 
 #[test]
@@ -497,13 +592,15 @@ fn rounded_slot_arcs_are_curves_not_corners() {
     // one factor per arc run (four here: two caps, cut twice), never one per vertex
     assert!(vals.len() <= p.arcs, "{} factors for {} arcs: {:?}", vals.len(), p.arcs, vals);
     assert!(
-        vals.last().unwrap() - vals.first().unwrap() < 0.02,
+        vals.last().unwrap() - vals.first().unwrap() < 0.06,
         "the same geometry must give the same arc feed: {:?}",
         vals
     );
+    // A 2.7 mm radius cap is a real U-turn: sqrt(2.7/8) is the curvature ceiling,
+    // far below the ~6 % a per-window angle would give.
     assert!(
-        vals.iter().all(|f| *f > 0.8 && *f < 0.99),
-        "a 2.7 mm arc is a mild slow-down, got {:?}",
+        vals.iter().all(|f| *f > 0.5 && *f < 0.72),
+        "a 2.7 mm U-turn slows by radius, got {:?}",
         vals
     );
 }
@@ -520,8 +617,8 @@ fn rounded_slot_straights_keep_full_feed() {
     assert!(with_f > 0 && with_f < g1 / 5, "{} of {} G1 lines", with_f, g1);
     assert_eq!(g1, off_line.lines().filter(|l| l.contains(" G1")).count());
 
-    // the straights are untouched, so the whole program barely gets slower
-    assert!(t_on > t_off && t_on / t_off < 1.03, "{} vs {}", t_on, t_off);
+    // the straights are untouched; only the arcs' share of the path slows down
+    assert!(t_on > t_off && t_on / t_off < 1.25, "{} vs {}", t_on, t_off);
     assert!(logs.iter().any(|l| l.contains("0 corner(s)")));
 }
 
