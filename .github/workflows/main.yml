@@ -99,7 +99,7 @@ jobs:
 
       - name: Upload EXE
         if: steps.check.outputs.skip != 'true'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ISEL_to_Gcode_v${{ steps.ver.outputs.version }}
           path: src-tauri/target/release/ISEL_to_Gcode.exe
