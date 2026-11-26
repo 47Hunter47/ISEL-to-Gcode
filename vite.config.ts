@@ -8,13 +8,13 @@ import { resolve } from "node:path";
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   clearScreen: false,
-  resolve: { alias: { "@": resolve(__dirname, "src") } },
+  resolve: { alias: { "@": resolve(import.meta.dirname, "src") } },
   server: { port: 1420, strictPort: true },
   build: {
     rollupOptions: {
       input: {
-        main: resolve(__dirname, "index.html"),
-        preview: resolve(__dirname, "preview.html"),
+        main: resolve(import.meta.dirname, "index.html"),
+        preview: resolve(import.meta.dirname, "preview.html"),
       },
     },
   },

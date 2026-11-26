@@ -24,7 +24,7 @@ jobs:
 
       # the tauri build script embeds dist/ into the exe; the plain cargo steps
       # below don't run beforeBuildCommand, so build it here
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -47,7 +47,7 @@ jobs:
 
       # the tauri build script embeds dist/ into the exe; the plain cargo steps
       # below don't run beforeBuildCommand, so build it here
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
