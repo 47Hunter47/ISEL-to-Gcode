@@ -13,7 +13,7 @@ jobs:
       run:
         working-directory: src-tauri
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # rust-toolchain.toml pins a fully-qualified channel; rustup only accepts
       # that when the toolchain already exists, so install it explicitly.
@@ -41,7 +41,7 @@ jobs:
       run:
         working-directory: src-tauri
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - run: rustup toolchain install stable-x86_64-pc-windows-gnu --no-self-update --profile minimal
       - run: echo "C:\\mingw64\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
