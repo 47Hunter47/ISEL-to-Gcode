@@ -11,12 +11,16 @@ path = "src/lib.rs"
 name = "ISEL_to_Gcode"
 path = "src/main.rs"
 
+[build-dependencies]
+# tauri-build embeds the Win32 resource (icon + version) that the old build.rs
+# did by hand with windres; the icon comes from tauri.conf.json bundle.icon.
+tauri-build = { version = "2" }
+
 [dependencies]
-# glow (OpenGL) is enabled as a fallback renderer for machines where wgpu's
-# DirectX context can't be created (older/limited GPU drivers).
-eframe = { version = "0.37.0", features = ["glow"] }
-egui = "0.37.0"
-image = { version = "0.25.10", default-features = false, features = ["ico"] }
+tauri = { version = "2" }
+window-vibrancy = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 regex = "1.13.1"
 rfd = "0.18.0"
 
@@ -24,3 +28,7 @@ rfd = "0.18.0"
 lto = true
 strip = true
 codegen-units = 1
+
+[patch.crates-io]
+# static WebView2 loader on windows-gnu: see vendor/README note in AGENTS.md
+webview2-com-sys = { path = "../vendor/webview2-com-sys" }

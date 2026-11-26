@@ -18,7 +18,8 @@ Windows GUI application that converts ISEL CAM files into standard G-code (NC) p
 - **Optional corner feed reduction** (off by default) — analyses the whole XY toolpath and lowers the feed around genuine sharp corners, then restores it. Curved sections are recognised as curves, not as a chain of corners, so each arc runs at one steady reduced feed and the straights keep full speed. Only the `F` word of existing movements changes: coordinates, movement count, line numbers and the machined path stay exactly the same
 - **Toolpath preview** — top-down and isometric views with grid, pan, and zoom
 - **Estimated cycle time** shown after conversion
-- Single-file `.exe` — no installation required
+- Single-file `.exe` — no installation required; renders with the Edge WebView2
+  runtime that ships with Windows 11 (and arrives with Edge updates on Windows 10)
 
 ## Usage
 
@@ -54,16 +55,19 @@ The first spindle command is emitted **after** the first Z safe retract, so the 
 
 ## Building from source
 
-Requires Rust (the `src-tauri/rust-toolchain.toml` file pins the toolchain) and, on
-Windows, the GNU binutils that toolchain needs for linking (MSYS2/WinLibs or
-`winget install BrechtSanders.WinLibs.POSIX.UCRT`).
+Requires Rust (the `src-tauri/rust-toolchain.toml` file pins the toolchain), on
+Windows the GNU binutils that toolchain needs for linking (MSYS2/WinLibs or
+`winget install BrechtSanders.WinLibs.POSIX.UCRT`), and Node.js 22+ for the UI.
 
 ```bat
+npm install
+npm run build
 cd src-tauri
 cargo build --release
 ```
 
-The executable is created in `src-tauri/target/release/`. The same executable also runs
+`cargo build --release` embeds the built UI into the exe, so the result stays a
+single file in `src-tauri/target/release/`. The same executable also runs
 without the window for scripting: `ISEL_to_Gcode.exe convert in.isel out.ngc [--arcs] [--corners]`
 (flags come after the two paths; `--corners` enables corner feed reduction).
 

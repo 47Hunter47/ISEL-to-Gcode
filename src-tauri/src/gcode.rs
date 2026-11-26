@@ -5,18 +5,20 @@
 use regex::Regex;
 use std::sync::OnceLock;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Mt { Rapid, Cut, Arc }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize)]
 pub struct Mv { pub x: f64, pub y: f64, pub z: f64, pub mt: Mt }
 
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize)]
 pub struct Counts { pub rapid: usize, pub cut: usize, pub arc: usize }
 
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize)]
 pub struct Bounds { pub min_x: f64, pub max_x: f64, pub min_y: f64, pub max_y: f64 }
 
+#[derive(Clone, serde::Serialize)]
 pub struct GcodeParsed {
     pub points: Vec<Mv>,
     pub groups: Vec<(Mt, Vec<(f64, f64, f64)>)>,

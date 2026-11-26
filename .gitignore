@@ -10,3 +10,4 @@ build/
 *.spec
 src-tauri/target/
 .superpowers/
+src-tauri/gen/

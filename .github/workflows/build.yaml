@@ -22,6 +22,15 @@ jobs:
       # The GNU target needs binutils (as/dlltool); the runner image ships C:\mingw64.
       - run: echo "C:\\mingw64\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
+      # the tauri build script embeds dist/ into the exe; the plain cargo steps
+      # below don't run beforeBuildCommand, so build it here
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
       - run: cargo test
       # golden.rs + real_programs.rs compare bytes against python/published output
 
@@ -35,6 +44,16 @@ jobs:
       - uses: actions/checkout@v5
       - run: rustup toolchain install stable-x86_64-pc-windows-gnu --no-self-update --profile minimal
       - run: echo "C:\\mingw64\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # the tauri build script embeds dist/ into the exe; the plain cargo steps
+      # below don't run beforeBuildCommand, so build it here
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
       - run: cargo build --release
       - name: Version from Cargo.toml
         id: ver

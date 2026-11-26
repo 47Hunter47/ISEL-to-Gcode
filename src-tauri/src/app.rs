@@ -1,544 +1,15 @@
-// Main window: port of python run_gui() (isel_to_gcode_gui.py lines 990-1197).
-// Conversion runs on a worker thread and reports back over a channel, same as
-// python's threading.Thread + root.after() marshalling.
+// Window creation and startup diagnostics: what `run_with` in the old egui
+// app.rs did for eframe, now for tauri. The startup log, the panic hook and
+// the error box are kept verbatim — on a machine where the window never
+// appears they are the only evidence.
 
-use crate::convert::convert_file;
-use crate::preview::Preview;
-use crate::theme;
-use egui::{Color32, RichText};
-use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver};
-use std::time::Duration;
+use crate::commands::{self, GcodeCache, Prefill};
+use std::collections::HashMap;
+use std::sync::Mutex;
+use tauri::Manager;
 
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-// The palette lives in theme.rs (industrial SCADA look, sampled from the
-// Siemens keyvisual). These aliases keep the UI code short.
-const BG: Color32 = theme::PANEL;
-const BTN: Color32 = theme::BTN;
-const BLUE: Color32 = theme::ACCENT;
-const GREEN_BTN: Color32 = theme::BTN_ACTIVE;
-const LOG_GREEN: Color32 = theme::LOG;
 
-enum Msg {
-    Log(String),
-    Progress(f64, String),
-    Done(f64, String),
-    Failed(String),
-}
-
-/// A shell dialog running on its own thread. `rfd`'s Windows backend runs the
-/// modal IFileDialog on the calling thread, so calling it from the UI pass froze
-/// the whole window — for as long as the shell needed to resolve the pick (a
-/// network share takes seconds) and marked it "Not responding".
-#[derive(Clone, Copy, PartialEq)]
-enum Pending {
-    Pick,
-    Save,
-}
-
-// The status line doubles as the state light: mint on success, alarm on failure.
-fn status_color(s: &str) -> Color32 {
-    if s == "Error occurred" {
-        theme::ERR
-    } else if s == "Conversion complete!" {
-        theme::OK
-    } else {
-        theme::TEXT
-    }
-}
-
-pub struct App {
-    input: String,
-    use_arc: bool,
-    corner: bool,
-    log: Vec<String>,
-    progress: f32,
-    status: String,
-    converting: bool,
-    last_output: Option<String>,
-    rx: Option<Receiver<Msg>>,
-    preview: Option<Preview>,
-    dialog: Option<(String, String)>,
-    /// File dialog in flight (see `Pending`); polled in `drain_pending`.
-    pending: Option<(Pending, Receiver<Option<PathBuf>>)>,
-    // startup diagnostics: how many logic passes ran / did ui ever paint
-    probe: u8,
-    ui_probe: u8,
-}
-
-impl Default for App {
-    fn default() -> Self {
-        let mut log = vec![];
-        for l in [
-            "ISEL to G-code Converter Ready",
-            "Drag and drop a file or click Browse to start",
-            "--------------------------------------------------",
-        ] {
-            log.push(l.to_string());
-        }
-        App {
-            input: String::new(),
-            use_arc: false,
-            corner: false,
-            log,
-            progress: 0.0,
-            status: "Ready".to_string(),
-            converting: false,
-            last_output: None,
-            rx: None,
-            preview: None,
-            dialog: None,
-            pending: None,
-            probe: 0,
-            ui_probe: 0,
-        }
-    }
-}
-
-impl App {
-    fn push_log(&mut self, m: impl Into<String>) {
-        self.log.push(m.into());
-    }
-
-    fn busy(&self) -> bool {
-        self.converting || self.pending.is_some()
-    }
-
-    /// Open a shell dialog on a worker thread and remember it; `drain_pending`
-    /// picks the answer up on the UI thread. Never call a blocking dialog here.
-    fn spawn_dialog(&mut self, kind: Pending) {
-        let base = std::path::Path::new(&self.input)
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let (tx, rx) = channel();
-        std::thread::spawn(move || {
-            let picked = match kind {
-                Pending::Pick => rfd::FileDialog::new().pick_file(),
-                Pending::Save => rfd::FileDialog::new()
-                    .set_file_name(format!("{}.ngc", base))
-                    .add_filter("G-code Files", &["ngc"])
-                    .add_filter("All Files", &["*"])
-                    .save_file(),
-            };
-            let _ = tx.send(picked);
-        });
-        self.pending = Some((kind, rx));
-        self.status = "Waiting for the file dialog...".to_string();
-    }
-
-    fn drain_pending(&mut self) {
-        let Some((kind, rx)) = &self.pending else { return };
-        let Ok(picked) = rx.try_recv() else { return };
-        let kind = *kind;
-        self.pending = None;
-        self.status = "Ready".to_string();
-        match (kind, picked) {
-            (Pending::Pick, Some(p)) => {
-                self.input = p.to_string_lossy().into_owned();
-                self.push_log(format!("File selected: {}", self.input));
-            }
-            (Pending::Save, Some(p)) => {
-                self.begin_convert(p.to_string_lossy().into_owned());
-            }
-            // cancelled: nothing was started, so there is nothing to undo
-            (Pending::Pick, None) | (Pending::Save, None) => {}
-        }
-    }
-
-    /// CONVERT: validate the input, then ask where to save — asynchronously.
-    fn start_convert(&mut self) {
-        let in_path = self.input.clone();
-        if in_path.is_empty() {
-            self.dialog = Some(("Error".into(), "No input file selected".into()));
-            return;
-        }
-        if !std::path::Path::new(&in_path).is_file() {
-            self.dialog = Some(("Error".into(), format!("File not found: {}", in_path)));
-            return;
-        }
-        self.spawn_dialog(Pending::Save);
-    }
-
-    fn begin_convert(&mut self, out_path: String) {
-        let in_path = self.input.clone();
-        let arc = self.use_arc;
-        let corner = self.corner;
-        self.converting = true;
-        self.progress = 0.0;
-        self.status = "Starting conversion...".to_string();
-        self.log.clear();
-        self.push_log("Starting conversion...");
-        self.push_log(format!("Input:   {}", in_path));
-        self.push_log(format!("Output:  {}", out_path));
-        self.push_log(format!(
-            "Mode:    {}",
-            if arc {
-                "G2/G3 arc commands + full-circle detection (R format)"
-            } else {
-                "G1 linearised"
-            }
-        ));
-        self.push_log(format!(
-            "Corners:  {}",
-            if corner {
-                "adaptive feed reduction (G1 only, geometry unchanged)"
-            } else {
-                "off"
-            }
-        ));
-        self.push_log("--------------------------------------------------");
-
-        let (tx, rx) = channel();
-        self.rx = Some(rx);
-        std::thread::spawn(move || {
-            let tx_log = tx.clone();
-            let mut log = move |m: &str| {
-                let _ = tx_log.send(Msg::Log(m.to_string()));
-            };
-            let tx_prog = tx.clone();
-            let mut progress: Option<Box<dyn FnMut(f64, &str)>> = Some(Box::new(
-                move |p: f64, t: &str| {
-                    let _ = tx_prog.send(Msg::Progress(p, t.to_string()));
-                },
-            ));
-            match convert_file(&in_path, &out_path, arc, corner, &mut log, &mut progress) {
-                Ok(mins) => {
-                    let _ = tx.send(Msg::Done(mins, out_path));
-                }
-                Err(e) => {
-                    let _ = tx.send(Msg::Failed(e));
-                }
-            }
-        });
-    }
-
-    fn drain(&mut self) {
-        let mut msgs = vec![];
-        if let Some(rx) = &self.rx {
-            while let Ok(m) = rx.try_recv() {
-                msgs.push(m);
-            }
-        }
-        for m in msgs {
-            match m {
-                Msg::Log(s) => self.push_log(s),
-                Msg::Progress(p, t) => {
-                    self.progress = (p / 100.0) as f32;
-                    self.status = t;
-                }
-                Msg::Done(mins, out) => {
-                    self.converting = false;
-                    self.rx = None;
-                    self.last_output = Some(out);
-                    self.progress = 1.0;
-                    self.status = "Conversion complete!".to_string();
-                    let m = mins as u64;
-                    let s = ((mins - m as f64) * 60.0) as u64;
-                    self.push_log("--------------------------------------------------");
-                    self.push_log(format!(
-                        "\u{2713} Conversion completed  ({})",
-                        if self.use_arc { "G2/G3 arc commands" } else { "G1 linearised" }
-                    ));
-                    self.push_log(format!("\u{23f1} Estimated program time: {} min {} sec", m, s));
-                    self.push_log(
-                        "\u{26a0} Program time may change according to machine parameters",
-                    );
-                    self.dialog = Some((
-                        "Completed".into(),
-                        format!(
-                            "Conversion finished!\nMode: {}\n\nEstimated time: {} min {} sec",
-                            if self.use_arc { "G2/G3 arc commands" } else { "G1 linearised" },
-                            m,
-                            s
-                        ),
-                    ));
-                }
-                Msg::Failed(e) => {
-                    self.converting = false;
-                    self.rx = None;
-                    self.status = "Error occurred".to_string();
-                    self.push_log(format!("\u{2717} Error: {}", e));
-                    self.dialog = Some(("Error".into(), e));
-                }
-            }
-        }
-    }
-
-    fn open_preview(&mut self) {
-        let Some(path) = self.last_output.clone() else { return };
-        if !std::path::Path::new(&path).is_file() {
-            return;
-        }
-        match crate::gcode::parse_gcode(&path) {
-            Ok(data) if data.points.is_empty() => {
-                self.dialog = Some(("Preview".into(), "No moves found in G-code file.".into()));
-            }
-            Ok(data) => {
-                let name = std::path::Path::new(&path)
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                self.preview = Some(Preview::new(name, data));
-            }
-            Err(e) => {
-                self.dialog = Some(("Preview Error".into(), format!("Could not read G-code:\n{}", e)));
-            }
-        }
-    }
-}
-
-impl eframe::App for App {
-    // eframe 0.37 split the old `update` into `logic` (no painting) + `ui`.
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.drain_pending();
-        self.drain();
-        shot_hook(ctx);
-
-        // drag & drop
-        let dropped: Vec<PathBuf> = ctx.input_mut(|i| {
-            std::mem::take(&mut i.raw.dropped_files)
-                .iter()
-                .map(|f| f.path().to_path_buf())
-                .collect()
-        });
-        for p in dropped {
-            if p.is_file() {
-                self.input = p.to_string_lossy().into_owned();
-                self.push_log(format!("File imported: {}", self.input));
-            } else {
-                self.push_log(format!("Error: Not a valid file: {}", p.display()));
-            }
-        }
-
-        // eframe keeps the window hidden until it has painted a frame, and on Windows an
-        // invisible window gets no RedrawRequested, so nothing would ever paint and the
-        // window would stay hidden forever. If egui reports it hidden, ask for a paint and
-        // force it shown, and keep the loop ticking until it really is visible.
-        let (visible, inner, monitor) = ctx.input(|i| {
-            let vp = i.viewport();
-            (
-                vp.visible(),
-                vp.inner_rect
-                    .map(|r| (r.min.x as i32, r.min.y as i32, r.max.x as i32, r.max.y as i32)),
-                vp.monitor_size.map(|s| (s.x as i32, s.y as i32)),
-            )
-        });
-        if visible == Some(false) {
-            ctx.send_viewport_cmd_to(
-                egui::ViewportId::ROOT,
-                egui::ViewportCommand::RequestPaintWhileHidden,
-            );
-            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
-            ctx.request_repaint();
-        }
-        if self.probe < 5 {
-            self.probe += 1;
-            startup_log(&format!(
-                "logic pass {} visible={:?} inner={:?} monitor={:?}",
-                self.probe, visible, inner, monitor
-            ));
-        }
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if self.ui_probe == 0 {
-            self.ui_probe = 1;
-            startup_log("ui pass ran (first paint)");
-        }
-        let ctx = ui.ctx().clone();
-        egui::Frame::new()
-            .fill(BG)
-            .inner_margin(10.0)
-            .show(ui, |ui| {
-                ui.label(RichText::new("ISEL FILE").color(theme::TEXT));
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.input)
-                        .desired_width(f32::INFINITY)
-                        .text_color(theme::TEXT),
-                );
-
-                ui.add_space(8.0);
-                let busy = self.busy();
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(
-                            !busy,
-                            egui::Button::new("BROWSE").fill(BTN).min_size(egui::vec2(110.0, 28.0)),
-                        )
-                        .clicked()
-                    {
-                        self.spawn_dialog(Pending::Pick);
-                    }
-                    let convert_label = if self.converting { "CONVERTING..." } else { "CONVERT" };
-                    if ui
-                        .add_enabled(
-                            !busy,
-                            egui::Button::new(
-                                RichText::new(convert_label).strong().color(
-                                    // cyan fill wants dark glyphs, the dim mid-conversion fill wants light
-                                    if self.converting { theme::TEXT } else { theme::ON_ACCENT },
-                                ),
-                            )
-                                .fill(BLUE)
-                                .min_size(egui::vec2(110.0, 28.0)),
-                        )
-                        .clicked()
-                    {
-                        self.start_convert();
-                    }
-                    let has_out = self.last_output.is_some();
-                    if ui
-                        .add_enabled(
-                            has_out,
-                            egui::Button::new(RichText::new("PREVIEW").strong())
-                                .fill(GREEN_BTN)
-                                .min_size(egui::vec2(110.0, 28.0)),
-                        )
-                        .clicked()
-                    {
-                        self.open_preview();
-                    }
-                });
-
-                ui.checkbox(
-                    &mut self.use_arc,
-                    "Use G2/G3 arc commands  (smaller file, requires arc-capable controller)",
-                );
-                ui.checkbox(
-                    &mut self.corner,
-                    "Corner Feed Reduction  (slower feed around sharp G1 corners)",
-                );
-
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    // a dialog or a conversion is in flight: show it, so a slow
-                    // shell (network share) never looks like a hung window
-                    if busy {
-                        ui.spinner();
-                    }
-                    ui.label(RichText::new(self.status.clone()).color(status_color(&self.status)));
-                });
-                ui.add(
-                    egui::ProgressBar::new(self.progress)
-                        .desired_width(f32::INFINITY)
-                        .fill(theme::ACCENT)
-                        .desired_height(20.0),
-                );
-
-                ui.add_space(6.0);
-                ui.label("CONVERSION LOG");
-                egui::Frame::new()
-                    .fill(theme::DEEP)
-                    .inner_margin(4.0)
-                    .show(ui, |ui| {
-                        egui::ScrollArea::vertical()
-                            .stick_to_bottom(true)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                for line in &self.log {
-                                    ui.label(
-                                        RichText::new(line).monospace().color(LOG_GREEN),
-                                    );
-                                }
-                            });
-                    });
-            });
-
-        if let Some(p) = &mut self.preview {
-            p.show(&ctx);
-            if !p.open {
-                self.preview = None;
-            }
-        }
-
-        if let Some((title, body)) = self.dialog.clone() {
-            let mut close = false;
-            egui::Window::new(title)
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(&ctx, |ui| {
-                    ui.label(body);
-                    if ui.button("OK").clicked() {
-                        close = true;
-                    }
-                });
-            if close {
-                self.dialog = None;
-            }
-        }
-
-        if self.busy() {
-            ctx.request_repaint_after(Duration::from_millis(80));
-        }
-    }
-}
-
-/// `ISEL_SHOT=out.bmp`: paint one frame, write it out and quit. Machines with no
-/// visible desktop (Session 0, CI) otherwise cannot see this GUI at all.
-/// shortcut: BMP only (no alpha), only used by the shot check.
-fn shot_hook(ctx: &egui::Context) {
-    static DONE: std::sync::Once = std::sync::Once::new();
-    let Some(path) = std::env::var_os("ISEL_SHOT") else {
-        return;
-    };
-    DONE.call_once(|| {
-        let path = PathBuf::from(path);
-        startup_log(&format!("ISEL_SHOT -> {}", path.display()));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::ScreenshotCallback::new(
-            move |img: std::sync::Arc<egui::ColorImage>| match write_bmp(&path, &img) {
-                Ok(()) => {
-                    startup_log("ISEL_SHOT written");
-                    std::process::exit(0);
-                }
-                Err(e) => startup_log(&format!("ISEL_SHOT failed: {e}")),
-            },
-        )));
-        ctx.request_repaint();
-    });
-}
-
-/// 24-bit BMP by hand, so the shipped exe carries no image encoder.
-fn write_bmp(path: &std::path::Path, img: &egui::ColorImage) -> std::io::Result<()> {
-    use std::io::Write;
-    let w = img.size[0] as u32;
-    let h = img.size[1] as u32;
-    let row = (w * 3 + 3) / 4 * 4;
-    let pix = row * h;
-    let mut hdr: Vec<u8> = Vec::with_capacity(54);
-    hdr.extend_from_slice(b"BM");
-    hdr.extend_from_slice(&(54 + pix).to_le_bytes());
-    hdr.extend_from_slice(&0u32.to_le_bytes());
-    hdr.extend_from_slice(&54u32.to_le_bytes());
-    hdr.extend_from_slice(&40u32.to_le_bytes());
-    hdr.extend_from_slice(&w.to_le_bytes());
-    hdr.extend_from_slice(&(h as i32).to_le_bytes());
-    hdr.extend_from_slice(&1u16.to_le_bytes());
-    hdr.extend_from_slice(&24u16.to_le_bytes());
-    hdr.extend_from_slice(&0u32.to_le_bytes());
-    hdr.extend_from_slice(&pix.to_le_bytes());
-    hdr.extend_from_slice(&[0u8; 16]); // planes/sizes already written: infoheader is 40 bytes
-    let pad = vec![0u8; (row - w * 3) as usize];
-    let mut f = std::fs::File::create(path)?;
-    f.write_all(&hdr)?;
-    for y in (0..img.size[1]).rev() {
-        let row_start = y * img.size[0];
-        for x in 0..img.size[0] {
-            let [r, g, b, _] = img.pixels[row_start + x].to_opaque().to_srgba_unmultiplied();
-            f.write_all(&[b, g, r])?;
-        }
-        f.write_all(&pad)?;
-    }
-    Ok(())
-}
-
-pub fn run() {
-    run_with(None);
-}
-
-/// `prefill` seeds the input path — set when the exe is launched with a file
-/// argument (Windows "Open with" / drag onto the exe).
 /// First thing `run_with` does. Lets us tell "the exe never ran" (SmartScreen /
 /// AV quarantine) apart from "it ran and failed to open a window".
 fn startup_log(line: &str) {
@@ -593,255 +64,87 @@ pub fn run_with(prefill: Option<String>) {
         ));
     }));
 
-    let icon = image::load_from_memory(include_bytes!("../assets/icon.ico"))
-        .ok()
-        .map(|img| {
-            let img = img.to_rgba8();
-            let (w, h) = img.dimensions();
-            egui::IconData {
-                rgba: img.into_raw(),
-                width: w,
-                height: h,
-            }
-        });
-
-    // eframe's default renderer is wgpu (DirectX); glow (OpenGL) is the fallback.
-    // OpenGL comes first: it needs no async device creation, so a driver that
-    // stalls inside wgpu can't block startup. ISEL_RENDERER=wgpu forces the other order.
-    let mut order = [eframe::Renderer::Glow, eframe::Renderer::Wgpu];
-    if std::env::var("ISEL_RENDERER").as_deref() == Ok("wgpu") {
-        order = [eframe::Renderer::Wgpu, eframe::Renderer::Glow];
-    }
-    for renderer in order {
-        startup_log(&format!("trying {renderer:?}"));
-        let mut viewport = egui::ViewportBuilder::default()
-            .with_inner_size([520.0, 620.0])
-            .with_title(format!("ISEL \u{2192} G-code Converter v{}", APP_VERSION));
-        if let Some(icon) = icon.clone() {
-            viewport = viewport.with_icon(icon);
-        }
-        let options = eframe::NativeOptions {
-            viewport,
-            renderer,
-            ..Default::default()
-        };
-        let prefill = prefill.clone();
-        match eframe::run_native(
-            "ISEL to G-code Converter",
-            options,
-            Box::new(move |cc| {
-                // Fills, strokes, corner radii, selection and the text hierarchy
-                // all come from theme::visuals().
-                theme::apply(&cc.egui_ctx);
-                let mut app = App::default();
-                if let Some(p) = prefill {
-                    app.input = p;
-                    app.push_log(format!("File selected: {}", app.input));
+    let app = match tauri::Builder::default()
+        .manage(Prefill(prefill.clone()))
+        .manage(GcodeCache(Mutex::new(HashMap::new())))
+        .invoke_handler(tauri::generate_handler![
+            commands::check_input,
+            commands::pick_file,
+            commands::save_file,
+            commands::convert,
+            commands::get_prefill,
+            commands::get_version,
+            commands::parse_gcode,
+            commands::preview_view,
+            commands::open_preview_window
+        ])
+        .setup(move |app| {
+            startup_log("setup ran");
+            let handle = app.handle();
+            #[cfg(windows)]
+            if let Some(w) = handle.get_webview_window("main") {
+                // Mica first (built into Win11), acrylic as the Win10 fallback.
+                // If both fail (older GPU, remote session) the opaque CSS
+                // background still paints, so the window is never black.
+                if window_vibrancy::apply_mica(&w, Some(true)).is_err() {
+                    let _ = window_vibrancy::apply_acrylic(&w, Some((18, 18, 20, 255)));
                 }
-                // ISEL_PREVIEW=<out.ngc>: open the path preview at startup, so a machine
-                // with no usable desktop can prove the preview is its own OS window.
-                if let Some(p) = std::env::var_os("ISEL_PREVIEW") {
-                    app.last_output = Some(PathBuf::from(p).to_string_lossy().into_owned());
-                    app.open_preview();
-                    startup_log(&format!(
-                        "ISEL_PREVIEW={:?} preview_open={}",
-                        app.last_output.as_deref().unwrap_or(""),
-                        app.preview.is_some()
-                    ));
-                }
-                startup_log("app creator finished");
-                Ok(Box::new(app))
-            }),
-        ) {
-            Ok(()) => {
-                startup_log("run_native returned Ok (window closed)");
-                return;
+                let _ = w.set_title(&format!("ISEL \u{2192} G-code Converter v{}", APP_VERSION));
+                // The transparent borderless window is created hidden; show it
+                // explicitly. (Ground truth = WS_VISIBLE bit: measured on-par
+                // with a control app; IsWindowVisible lies for every window in
+                // a headless/disconnected session.)
+                let _ = w.show();
             }
-            Err(e) => startup_log(&format!("renderer {renderer:?} failed: {e}")),
+            #[cfg(target_os = "macos")]
+            if let Some(w) = handle.get_webview_window("main") {
+                let _ = window_vibrancy::apply_vibrancy(
+                    &w,
+                    window_vibrancy::NSVisualEffectMaterial::HudWindow,
+                    Some(window_vibrancy::NSVisualEffectState::Active),
+                    Some((18.0, 18.0)),
+                );
+            }
+            // ISEL_PREVIEW=<out.ngc>: open the path preview at startup, so a
+            // machine with no usable desktop can still prove the preview is
+            // its own OS window (EnumWindows sees a second top-level window).
+            if let Some(p) = std::env::var_os("ISEL_PREVIEW") {
+                let path = std::path::PathBuf::from(p).to_string_lossy().into_owned();
+                let opened = match commands::open_preview(handle, path.clone()) {
+                    Ok(None) => true,
+                    Ok(Some(msg)) => {
+                        startup_log(&format!("ISEL_PREVIEW message: {msg}"));
+                        false
+                    }
+                    Err(e) => {
+                        startup_log(&format!("ISEL_PREVIEW error: {e}"));
+                        false
+                    }
+                };
+                startup_log(&format!("ISEL_PREVIEW={path:?} preview_open={opened}"));
+            }
+            startup_log("setup finished");
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+    {
+        Ok(app) => app,
+        Err(e) => {
+            // eframe's lesson kept: an ignored error means a silent exit with
+            // no window. The usual cause is a missing WebView2 runtime.
+            startup_log(&format!("build failed: {e}"));
+            show_error(
+                "Could not open a window.\nThis app needs the Microsoft Edge WebView2 runtime \
+                 (built into Windows 11; delivered with Edge updates on Windows 10).\n\n\
+                 Details: %TEMP%\\ISEL_to_Gcode_startup.log",
+            );
+            std::process::exit(1);
         }
-    }
-    show_error(
-        "Could not open a window.\n\nDetails: %TEMP%\\ISEL_to_Gcode_startup.log",
-    );
-    std::process::exit(1);
-}
-
-// GUI state machine tests: no window needed, everything is channel + field state.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn shot_bmp_is_bottom_up_bgr() {
-        // A known 2x2 grid, checked byte by byte: header, row order, BGR order.
-        let img = egui::ColorImage::new(
-            [2, 2],
-            vec![
-                Color32::RED,
-                Color32::from_rgb(0, 255, 0),
-                Color32::from_rgb(0, 0, 255),
-                Color32::WHITE,
-            ],
-        );
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/shot_check.bmp");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        write_bmp(&path, &img).unwrap();
-        let b = std::fs::read(&path).unwrap();
-        assert_eq!(&b[0..2], b"BM");
-        assert_eq!(&b[18..22], 2u32.to_le_bytes(), "width");
-        assert_eq!(&b[22..26], 2u32.to_le_bytes(), "height stays positive (bottom-up)");
-        assert_eq!(&b[28..30], 24u16.to_le_bytes(), "24 bit");
-        // a 2 px row is 6 bytes, padded to 8; bottom row first, and BMP stores
-        // blue as (255,0,0)
-        let stride = 8;
-        assert_eq!(
-            &b[54..54 + stride],
-            &[255, 0, 0, 255, 255, 255, 0, 0],
-            "bottom row: blue, white, then the row pad"
-        );
-        assert_eq!(
-            &b[54 + stride..54 + 2 * stride],
-            &[0, 0, 255, 0, 255, 0, 0, 0],
-            "top row: red, green, then the row pad"
-        );
-        assert_eq!(b.len(), 54 + 2 * stride);
-    }
-
-
-    fn golden(name: &str) -> String {
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/").to_string() + name
-    }
-
-    #[test]
-    fn preview_opens_from_completed_output() {
-        let mut app = App::default();
-        app.last_output = Some(golden("/sample_expected.arcs.ngc"));
-        app.open_preview();
-        let p = app.preview.expect("preview should open");
-        assert!(p.open);
-        assert_eq!(p.title, "sample_expected.arcs.ngc");
-        assert!(!p.data.points.is_empty());
-        assert!(app.dialog.is_none());
-    }
-
-    #[test]
-    fn preview_reports_missing_file_without_opening_window() {
-        let mut app = App::default();
-        app.last_output = Some("C:/definitely/not/here.ngc".into());
-        app.open_preview();
-        assert!(app.preview.is_none());
-        assert!(app.dialog.is_none(), "missing output is a silent no-op");
-    }
-
-    #[test]
-    fn opening_a_dialog_does_not_block_the_caller() {
-        // The freeze this guards: rfd runs the modal IFileDialog on the calling
-        // thread, so a slow shell (network share) froze the window. The dialog is
-        // now on a worker thread, so asking for one returns at once. The dialog
-        // itself is left to the OS here — its result is tested above by channel.
-        let mut app = App::default();
-        let t = std::time::Instant::now();
-        app.spawn_dialog(Pending::Pick);
-        assert!(t.elapsed() < std::time::Duration::from_millis(500), "{:?}", t.elapsed());
-        assert!(app.busy());
-        assert_eq!(app.status, "Waiting for the file dialog...");
-    }
-
-    #[test]
-    fn picked_file_lands_in_the_input_field() {
-        let mut app = App::default();
-        let (tx, rx) = channel();
-        app.pending = Some((Pending::Pick, rx));
-        tx.send(Some(PathBuf::from("C:/parts/job1.isel"))).unwrap();
-        app.drain_pending();
-        assert!(!app.busy());
-        assert_eq!(app.input, "C:/parts/job1.isel");
-        assert!(app.log.iter().any(|l| l.contains("File selected: C:/parts/job1.isel")));
-    }
-
-    #[test]
-    fn cancelled_pick_changes_nothing() {
-        let mut app = App::default();
-        let (tx, rx) = channel();
-        app.input = "C:/keep/this.isel".into();
-        app.pending = Some((Pending::Pick, rx));
-        assert!(app.busy(), "the in-flight dialog locks the buttons");
-        tx.send(None).unwrap();
-        app.drain_pending();
-        assert!(!app.busy());
-        assert_eq!(app.input, "C:/keep/this.isel");
-        assert_eq!(app.status, "Ready");
-    }
-
-    #[test]
-    fn done_message_finalizes_state() {
-        let mut app = App::default();
-        let (tx, rx) = channel();
-        app.rx = Some(rx);
-        app.converting = true;
-        app.push_log("Starting conversion...");
-        tx.send(Msg::Progress(50.0, "Converted 1000 points".into())).unwrap();
-        tx.send(Msg::Done(2.5, "C:/tmp/out.ngc".into())).unwrap();
-        app.drain();
-        assert!(!app.converting);
-        assert!(app.rx.is_none());
-        assert_eq!(app.last_output.as_deref(), Some("C:/tmp/out.ngc"));
-        assert_eq!(app.status, "Conversion complete!");
-        assert!((app.progress - 1.0).abs() < 1e-6);
-        // progress updates the status label only (python parity), never the log
-        let log = app.log.join("\n");
-        assert!(!log.contains("Converted 1000 points"), "{log}");
-        assert!(log.contains("2 min 30 sec"), "{log}");
-        let (_, body) = app.dialog.expect("completion dialog");
-        assert!(body.contains("2 min 30 sec"), "{body}");
-    }
-
-    #[test]
-    fn failed_message_surfaces_error_dialog() {
-        let mut app = App::default();
-        let (tx, rx) = channel();
-        app.rx = Some(rx);
-        app.converting = true;
-        tx.send(Msg::Failed("Input file not found".into())).unwrap();
-        app.drain();
-        assert!(!app.converting);
-        assert_eq!(app.status, "Error occurred");
-        let (title, body) = app.dialog.expect("error dialog");
-        assert_eq!(title, "Error");
-        assert!(body.contains("Input file not found"));
-        assert!(app.log.join("\n").contains("Error: Input file not found"));
-    }
-
-    #[test]
-    fn empty_input_starts_nothing_and_shows_error() {
-        let mut app = App::default();
-        app.start_convert();
-        assert!(app.converting == false);
-        let (_, body) = app.dialog.expect("error dialog");
-        assert_eq!(body, "No input file selected");
-    }
-
-    #[test]
-    fn missing_input_file_shows_error() {
-        let mut app = App::default();
-        app.input = "C:/definitely/not/here.isel".into();
-        app.start_convert();
-        assert!(!app.converting);
-        let (_, body) = app.dialog.expect("error dialog");
-        assert!(body.contains("File not found"), "{body}");
-    }
-
-    #[test]
-    fn empty_gcode_yields_message_not_window() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("isel_empty_{}.ngc", std::process::id()));
-        std::fs::write(&path, "M30\n").unwrap();
-        let mut app = App::default();
-        app.last_output = Some(path.to_string_lossy().into_owned());
-        app.open_preview();
-        assert!(app.preview.is_none());
-        let (_, body) = app.dialog.expect("empty message");
-        assert!(body.contains("No moves found"), "{body}");
-        let _ = std::fs::remove_file(&path);
-    }
+    };
+    app.run(|_, event| {
+        if let tauri::RunEvent::Exit = event {
+            startup_log("run exited");
+        }
+    });
+    startup_log("run returned Ok (window closed)");
 }

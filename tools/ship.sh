@@ -54,6 +54,10 @@ else
   echo "version $cur -> $new ($bump)"
 
   sed -i "s/^version = \"$cur\"$/version = \"$new\"/" src-tauri/Cargo.toml
+  # tauri.conf.json declares the same version; tauri-build rejects a drift
+  sed -i "s/\"version\": \"$cur\"/\"version\": \"$new\"/" src-tauri/tauri.conf.json
+  grep -q "\"version\": \"$new\"" src-tauri/tauri.conf.json ||
+    { echo "error: src-tauri/tauri.conf.json was not updated" >&2; exit 1; }
   # Cargo.lock keeps the package's own version too; `cargo metadata` would fix it
   # but it silently accepts a broken lock, so patch the one block and verify that.
   awk -v v="$new" '
