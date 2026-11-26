@@ -244,7 +244,9 @@ fn gentle_curve_stays_at_full_feed() {
 
 #[test]
 fn small_feature_is_detected_not_erased() {
-    // 1 mm square notch in a straight path: four corners, all kept
+    // 1 mm square notch in a straight path: four right angles 1 mm apart. Pairs
+    // of them turn the same way, so they may be reported as one curved section
+    // instead of two corners — what matters is that every notch segment slows.
     let p = analyze(&prog(&[
         (0.0, 0.0),
         (10.0, 0.0),
@@ -253,8 +255,10 @@ fn small_feature_is_detected_not_erased() {
         (11.0, 0.0),
         (20.0, 0.0),
     ]));
-    assert_eq!(p.corners, 4);
-    assert!((seg(&p, 1) - 0.4).abs() < 0.02, "notch slows the tool");
+    assert!(p.corners + p.arcs >= 2, "corners {} arcs {}", p.corners, p.arcs);
+    for s in 1..=3 {
+        assert!(seg(&p, s) <= 0.45, "notch segment {} runs at {}", s, seg(&p, s));
+    }
 }
 
 #[test]
@@ -476,6 +480,49 @@ fn feed_never_exceeds_the_vel_feed() {
     let feeds = f_values(&on);
     assert!(!feeds.is_empty());
     assert!(feeds.iter().all(|f| *f <= 1500.0), "{:?}", feeds);
+}
+
+#[test]
+fn rounded_slot_arcs_are_curves_not_corners() {
+    // Mert's real slot program: two 12.6 mm straights joined by r≈2.7 mm end
+    // arcs, cut twice. At a 1 mm chord a vertex on that arc reads ~22°, i.e.
+    // more than the corner floor — the reported defect was exactly that: 128
+    // "corners", an F on every line, feed wandering between F645 and F940.
+    let p = analyze(&fixture("slot.isel"));
+    assert_eq!(p.corners, 0, "a rounded slot has no sharp corner");
+    assert!(p.arcs >= 2, "end arcs: {}", p.arcs);
+    let mut vals: Vec<f64> = p.factors.values().copied().collect();
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    vals.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    // one factor per arc run (four here: two caps, cut twice), never one per vertex
+    assert!(vals.len() <= p.arcs, "{} factors for {} arcs: {:?}", vals.len(), p.arcs, vals);
+    assert!(
+        vals.last().unwrap() - vals.first().unwrap() < 0.02,
+        "the same geometry must give the same arc feed: {:?}",
+        vals
+    );
+    assert!(
+        vals.iter().all(|f| *f > 0.8 && *f < 0.99),
+        "a 2.7 mm arc is a mild slow-down, got {:?}",
+        vals
+    );
+}
+
+#[test]
+fn rounded_slot_straights_keep_full_feed() {
+    let text = fixture("slot.isel");
+    let (on, logs, t_on) = run(&text, false, true);
+    let (off_line, _, t_off) = run(&text, false, false);
+
+    // 137 G1 moves; only the arcs' own segments and their restores carry an F
+    let g1 = on.lines().filter(|l| l.contains(" G1")).count();
+    let with_f = on.lines().filter(|l| l.contains(" G1") && l.contains(" F")).count();
+    assert!(with_f > 0 && with_f < g1 / 5, "{} of {} G1 lines", with_f, g1);
+    assert_eq!(g1, off_line.lines().filter(|l| l.contains(" G1")).count());
+
+    // the straights are untouched, so the whole program barely gets slower
+    assert!(t_on > t_off && t_on / t_off < 1.03, "{} vs {}", t_on, t_off);
+    assert!(logs.iter().any(|l| l.contains("0 corner(s)")));
 }
 
 #[test]

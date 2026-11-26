@@ -24,9 +24,15 @@ written in English.
 - Windows GNU only. Keep `-C link-self-contained=yes` in `rust/.cargo/config.toml`.
 - CLI: `ISEL_to_Gcode.exe convert <in.isel> <out.ngc> [--arcs] [--corners]` — flags come
   after the two paths.
-- Release: `version` in `rust/Cargo.toml` is the single source of truth and is bumped by
-  hand; commit, `git tag -a vX.Y.Z`, push the tag, `gh release create vX.Y.Z`. Only a
-  *published* release triggers the CI build and attaches `ISEL_to_Gcode.exe`.
+- Finishing a change is `./tools/ship.sh "<conventional commit message>"`: it commits the
+  work, bumps the version implied by the commits since the last bump (`feat` = minor,
+  `fix` = patch, otherwise none), updates `Cargo.toml`/`Cargo.lock`/the README badge in
+  the same commit and pushes. A plain `git push` does not bump, and a pre-push hook cannot
+  do it: git resolves the refs before the hook runs, so a commit made inside the hook is
+  never pushed.
+- Release: `version` in `rust/Cargo.toml` is the single source of truth; `git tag -a
+  vX.Y.Z`, push the tag, `gh release create vX.Y.Z`. Only a *published* release triggers
+  the CI build and attaches `ISEL_to_Gcode.exe`.
 
 ## Do
 - Keep the output byte-for-byte identical to `tests/fixtures/*expected*`.

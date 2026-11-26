@@ -15,7 +15,7 @@ Windows GUI application that converts ISEL CAM files into standard G-code (NC) p
   - `G1 linearised` — arcs expanded into short line segments
   - `G2/G3 arc commands` — true arc output with full-circle detection (R format, split into two semicircles for controller compatibility)
 - **Spindle handling** — `S... M03` from `SPINDLE CW`, with `M05`/`M30` program end
-- **Optional corner feed reduction** (off by default) — analyses the whole XY toolpath and lowers the feed around genuine sharp corners, then restores it. Only the `F` word of existing movements changes: coordinates, movement count, line numbers and the machined path stay exactly the same
+- **Optional corner feed reduction** (off by default) — analyses the whole XY toolpath and lowers the feed around genuine sharp corners, then restores it. Curved sections are recognised as curves, not as a chain of corners, so each arc runs at one steady reduced feed and the straights keep full speed. Only the `F` word of existing movements changes: coordinates, movement count, line numbers and the machined path stay exactly the same
 - **Toolpath preview** — top-down and isometric views with grid, pan, and zoom
 - **Estimated cycle time** shown after conversion
 - Single-file `.exe` — no installation required

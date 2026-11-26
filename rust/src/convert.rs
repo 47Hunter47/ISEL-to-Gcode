@@ -514,8 +514,9 @@ pub fn convert_file(
         }
         let plan = crate::corner::analyze(&text);
         log(&format!(
-            "Corner feed reduction: {} corner(s), {} movement(s) at reduced feed",
+            "Corner feed reduction: {} corner(s), {} curved section(s), {} movement(s) at reduced feed",
             plan.corners,
+            plan.arcs,
             plan.factors.len()
         ));
         Some(plan.factors)
