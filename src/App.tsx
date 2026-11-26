@@ -63,6 +63,9 @@ export default function App() {
   // mirrors for the async callbacks (state inside closures goes stale)
   const vals = useRef({ input, useArc, corner });
   vals.current = { input, useArc, corner };
+  const busyRef = useRef(false); // drag/drop lives outside React state flow
+  busyRef.current = busy;
+  const startingRef = useRef(false); // re-entry guard for convert()
   const unlistens = useRef<UnlistenFn[]>([]);
   const logBox = useRef<HTMLDivElement>(null);
 
@@ -71,12 +74,17 @@ export default function App() {
   const browse = async () => {
     setWaitingDialog(true);
     setStatus("Waiting for the file dialog...");
-    const p = await api.pickFile();
-    setWaitingDialog(false);
-    setStatus("Ready");
-    if (p) {
-      setInput(p);
-      pushLog(`File selected: ${p}`);
+    try {
+      const p = await api.pickFile();
+      if (p) {
+        setInput(p);
+        pushLog(`File selected: ${p}`);
+      }
+    } catch (e) {
+      setMsg({ title: "Error", body: String(e) }); // rejection is a failure; cancel returns null
+    } finally {
+      setWaitingDialog(false);
+      setStatus("Ready");
     }
   };
 
@@ -89,77 +97,108 @@ export default function App() {
   const isTauri = "__TAURI_INTERNALS__" in window;
 
   const convert = async () => {
-    const v = vals.current;
+    if (startingRef.current) return; // Enter already fired while an earlier start awaited
+    startingRef.current = true;
     try {
-      await api.checkInput(v.input);
-    } catch (e) {
-      setMsg({ title: "Error", body: String(e) });
-      return;
-    }
-    setWaitingDialog(true);
-    setStatus("Waiting for the file dialog...");
-    const out = await api.saveFile(`${stem(v.input)}.ngc`);
-    setWaitingDialog(false);
-    if (!out) {
-      setStatus("Ready"); // cancelled: nothing was started, nothing to undo
-      return;
-    }
-    // begin_convert's header lines, same strings as the egui port
-    setLog([
-      "Starting conversion...",
-      `Input:   ${v.input}`,
-      `Output:  ${out}`,
-      `Mode:    ${v.useArc ? "G2/G3 arc commands + full-circle detection (R format)" : "G1 linearised"}`,
-      `Corners:  ${v.corner ? "adaptive feed reduction (G1 only, geometry unchanged)" : "off"}`,
-      SEP,
-    ]);
-    setStatus("Starting conversion...");
-    setProgress(0);
-    setConverting(true);
+      // immutable snapshot of what THIS conversion runs with; completion text
+      // must describe it, not whatever the (disabled but re-renderable) UI says
+      // later
+      const v = vals.current;
+      try {
+        await api.checkInput(v.input);
+      } catch (e) {
+        setMsg({ title: "Error", body: String(e) });
+        return;
+      }
+      setWaitingDialog(true);
+      setStatus("Waiting for the file dialog...");
+      let out: string | null = null;
+      try {
+        out = await api.saveFile(`${stem(v.input)}.ngc`);
+      } catch (e) {
+        setMsg({ title: "Error", body: String(e) }); // rejection is a failure; cancel returns null
+      } finally {
+        setWaitingDialog(false);
+      }
+      if (!out) {
+        setStatus("Ready"); // cancelled or dialog failed: nothing was started, nothing to undo
+        return;
+      }
+      // begin_convert's header lines, same strings as the egui port
+      setLog([
+        "Starting conversion...",
+        `Input:   ${v.input}`,
+        `Output:  ${out}`,
+        `Mode:    ${v.useArc ? "G2/G3 arc commands + full-circle detection (R format)" : "G1 linearised"}`,
+        `Corners:  ${v.corner ? (v.useArc ? "not applied in G2/G3 arc mode" : "adaptive feed reduction (G1 only, geometry unchanged)") : "off"}`,
+        SEP,
+      ]);
+      setStatus("Starting conversion...");
+      setProgress(0);
+      setConverting(true);
 
-    unlistens.current = await Promise.all([
-      listen<LogMsg>("convert-log", (e) => pushLog(e.payload.line)),
-      listen<ProgressMsg>("convert-progress", (e) => {
-        setProgress(e.payload.percent / 100); // progress updates the status label only (python parity)
-        setStatus(e.payload.text);
-      }),
-      listen<DoneMsg>("convert-done", (e) => {
-        const m = Math.floor(e.payload.minutes);
-        const s = Math.floor((e.payload.minutes - m) * 60);
-        setConverting(false);
-        setLastOutput(e.payload.output);
-        setProgress(1);
-        setStatus("Conversion complete!");
-        setLog((l) => [
-          ...l,
-          SEP,
-          `\u2713 Conversion completed  (${modeLabel(vals.current.useArc)})`,
-          `\u23F1 Estimated program time: ${m} min ${s} sec`,
-          "\u26A0 Program time may change according to machine parameters",
-        ]);
-        setMsg({
-          title: "Completed",
-          body: `Conversion finished!\nMode: ${modeLabel(vals.current.useArc)}\n\nEstimated time: ${m} min ${s} sec`,
-        });
-        cleanup();
-      }),
-      listen<FailedMsg>("convert-failed", (e) => {
+      // Register before starting and adopt each unlisten immediately, so any
+      // failure halfway still leaves every registered listener reachable for
+      // cleanup() (a Promise.all that rejects halfway drops the resolved ones).
+      try {
+        unlistens.current.push(await listen<LogMsg>("convert-log", (e) => pushLog(e.payload.line)));
+        unlistens.current.push(
+          await listen<ProgressMsg>("convert-progress", (e) => {
+            setProgress(e.payload.percent / 100); // progress updates the status label only (python parity)
+            setStatus(e.payload.text);
+          }),
+        );
+        unlistens.current.push(
+          await listen<DoneMsg>("convert-done", (e) => {
+            const m = Math.floor(e.payload.minutes);
+            const s = Math.floor((e.payload.minutes - m) * 60);
+            setConverting(false);
+            setLastOutput(e.payload.output);
+            setProgress(1);
+            setStatus("Conversion complete!");
+            setLog((l) => [
+              ...l,
+              SEP,
+              `\u2713 Conversion completed  (${modeLabel(v.useArc)})`,
+              `\u23F1 Estimated program time: ${m} min ${s} sec`,
+              "\u26A0 Program time may change according to machine parameters",
+            ]);
+            setMsg({
+              title: "Completed",
+              body: `Conversion finished!\nMode: ${modeLabel(v.useArc)}\n\nEstimated time: ${m} min ${s} sec`,
+            });
+            cleanup();
+          }),
+        );
+        unlistens.current.push(
+          await listen<FailedMsg>("convert-failed", (e) => {
+            setConverting(false);
+            setStatus("Error occurred");
+            pushLog(`\u2717 Error: ${e.payload.error}`);
+            setMsg({ title: "Error", body: e.payload.error });
+            cleanup();
+          }),
+        );
+      } catch (e) {
         setConverting(false);
         setStatus("Error occurred");
-        pushLog(`\u2717 Error: ${e.payload.error}`);
-        setMsg({ title: "Error", body: e.payload.error });
+        pushLog(`\u2717 Error: ${e}`);
+        setMsg({ title: "Error", body: String(e) });
         cleanup();
-      }),
-    ]);
+        return;
+      }
 
-    try {
-      await api.convert(v.input, out, v.useArc, v.corner);
-    } catch (e) {
-      setConverting(false);
-      setStatus("Error occurred");
-      pushLog(`\u2717 Error: ${e}`);
-      setMsg({ title: "Error", body: String(e) });
-      cleanup();
+      try {
+        await api.convert(v.input, out, v.useArc, v.corner);
+      } catch (e) {
+        setConverting(false);
+        setStatus("Error occurred");
+        pushLog(`\u2717 Error: ${e}`);
+        setMsg({ title: "Error", body: String(e) });
+        cleanup();
+      }
+    } finally {
+      startingRef.current = false;
     }
   };
 
@@ -188,6 +227,7 @@ export default function App() {
     let un: UnlistenFn | undefined;
     getCurrentWebview()
       .onDragDropEvent((e) => {
+        if (busyRef.current) return; // a conversion is running: the settings snapshot must not move
         const p = e.payload;
         if (p.type === "enter" || p.type === "over") setDropping(true);
         else if (p.type === "leave") setDropping(false);
@@ -280,7 +320,7 @@ export default function App() {
                 </Button>
                 <Button
                   variant="secondary"
-                  disabled={!lastOutput}
+                  disabled={!lastOutput || busy}
                   onClick={preview}
                   className="w-28 font-semibold text-[#6ccb5f] hover:bg-[rgba(108,203,95,0.16)]"
                 >
@@ -306,6 +346,7 @@ export default function App() {
                 <Input
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
+                  disabled={busy}
                   spellCheck={false}
                   className="mt-1 bg-[#1f1f1f] font-mono text-[12px] text-zinc-100 placeholder:text-zinc-600"
                   placeholder="Drop an ISEL file here or click Browse"
@@ -317,27 +358,42 @@ export default function App() {
                   {/* fluent selectable rows: checked = accent pill/tint so the
                       toggle state reads at a glance, not just the 16px box */}
                   <label
-                    className={`flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 transition-colors duration-150 ${
+                    className={`flex items-center gap-2 rounded-md border px-3 py-2 transition-colors duration-150 ${
+                      busy ? "cursor-default" : "cursor-pointer"
+                    } ${
                       useArc
                         ? "border-fluent-accent/60 bg-fluent-accent/10 text-white"
                         : "border-white/[0.07] hover:bg-white/[0.04]"
                     }`}
                   >
-                    <Checkbox id="arcs" checked={useArc} onCheckedChange={(c) => setUseArc(c === true)} />
+                    <Checkbox
+                      id="arcs"
+                      checked={useArc}
+                      disabled={busy}
+                      onCheckedChange={(c) => setUseArc(c === true)}
+                    />
                     <span className="font-normal">
                       Use G2/G3 arc commands&nbsp;&nbsp;(smaller file, requires arc-capable controller)
                     </span>
                   </label>
                   <label
-                    className={`flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 transition-colors duration-150 ${
+                    className={`flex items-center gap-2 rounded-md border px-3 py-2 transition-colors duration-150 ${
+                      busy ? "cursor-default" : "cursor-pointer"
+                    } ${
                       corner
                         ? "border-fluent-accent/60 bg-fluent-accent/10 text-white"
                         : "border-white/[0.07] hover:bg-white/[0.04]"
                     }`}
                   >
-                    <Checkbox id="corners" checked={corner} onCheckedChange={(c) => setCorner(c === true)} />
+                    <Checkbox
+                      id="corners"
+                      checked={corner}
+                      disabled={busy}
+                      onCheckedChange={(c) => setCorner(c === true)}
+                    />
                     <span className="font-normal">
                       Corner Feed Reduction&nbsp;&nbsp;(slower feed around sharp G1 corners)
+                      {useArc && <span className="text-zinc-500"> · NOT applied in G2/G3 arc mode</span>}
                     </span>
                   </label>
                 </section>

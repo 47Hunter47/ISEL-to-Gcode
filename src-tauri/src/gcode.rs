@@ -9,21 +9,24 @@ use std::sync::OnceLock;
 #[serde(rename_all = "lowercase")]
 pub enum Mt { Rapid, Cut, Arc }
 
-#[derive(Clone, Copy, serde::Serialize)]
-pub struct Mv { pub x: f64, pub y: f64, pub z: f64, pub mt: Mt }
-
-#[derive(Default, Clone, serde::Serialize)]
+#[derive(Default, Clone, Copy, Debug, serde::Serialize)]
 pub struct Counts { pub rapid: usize, pub cut: usize, pub arc: usize }
 
-#[derive(Default, Clone, serde::Serialize)]
+#[derive(Default, Clone, Copy, Debug, serde::Serialize)]
 pub struct Bounds { pub min_x: f64, pub max_x: f64, pub min_y: f64, pub max_y: f64 }
 
+/// Every drawable point lives exactly once: inside `groups`, as consecutive
+/// runs of the same move type (python build_groups). Counts and bounds are
+/// accumulated while parsing, so nothing walks the geometry a second time.
 #[derive(Clone, serde::Serialize)]
 pub struct GcodeParsed {
-    pub points: Vec<Mv>,
     pub groups: Vec<(Mt, Vec<(f64, f64, f64)>)>,
     pub counts: Counts,
     pub bounds: Bounds,
+}
+
+impl GcodeParsed {
+    pub fn has_moves(&self) -> bool { !self.groups.is_empty() }
 }
 
 fn re(pat: &str) -> &'static Regex {
@@ -32,6 +35,9 @@ fn re(pat: &str) -> &'static Regex {
         .get_or_init(|| {
             [
                 r"^N\d+\s*",
+                r";.*",
+                r"\([^)]*\)",
+                r"^G(\d+)(.?)",
                 r"X(-?\d+(?:\.\d+)?)",
                 r"Y(-?\d+(?:\.\d+)?)",
                 r"Z(-?\d+(?:\.\d+)?)",
@@ -93,18 +99,49 @@ pub fn arc_to_polyline(x0: f64, y0: f64, x1: f64, y1: f64, r_signed: f64, is_g2:
 pub fn parse_gcode(path: &str) -> Result<GcodeParsed, String> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| format!("Could not read G-code: {}", e))?;
-    let mut points: Vec<Mv> = vec![];
+    let mut groups: Vec<(Mt, Vec<(f64, f64, f64)>)> = vec![];
+    let mut counts = Counts::default();
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+    let mut any = false;
+    // python build_groups, folded into the parse: consecutive runs of the same
+    // move type; counts and bounds ride along so the geometry is never re-walked.
+    let mut push = |mt: Mt, x: f64, y: f64, z: f64| {
+        if groups.last().map(|g| g.0 != mt).unwrap_or(true) {
+            groups.push((mt, vec![]));
+        }
+        groups.last_mut().unwrap().1.push((x, y, z));
+        match mt { Mt::Rapid => counts.rapid += 1, Mt::Cut => counts.cut += 1, Mt::Arc => counts.arc += 1 }
+        if x < min_x { min_x = x; }
+        if x > max_x { max_x = x; }
+        if y < min_y { min_y = y; }
+        if y > max_y { max_y = y; }
+        any = true;
+    };
     let (mut cx, mut cy, mut cz) = (0.0, 0.0, 0.0);
     for line in raw.lines() {
         let line = line.trim();
         if line.is_empty() { continue; }
-        let ln = re(r"^N\d+\s*").replace(line, "").into_owned();
+        // Strip comments before anything else: a `;` tail or `(...)` span can
+        // carry X/Y/Z words and G-words that are prose, not program (no nesting
+        // supported — none in converter output; upgrade if a real input needs it).
+        let line = re(r";.*").replace_all(line, "").into_owned();
+        let line = re(r"\([^)]*\)").replace_all(&line, "").into_owned();
+        let ln = re(r"^N\d+\s*").replace(&line, "").into_owned();
         if ln.is_empty() { continue; }
-        let is_g0 = ln.starts_with("G0");
-        let is_g1 = ln.starts_with("G1");
-        let is_g2 = ln.starts_with("G2");
-        let is_g3 = ln.starts_with("G3");
-        if !(is_g0 || is_g1 || is_g2 || is_g3) { continue; }
+        // Exact G-word, not a prefix: G17/G20/G21/G40/G90 are not motion, and
+        // G01/G02/G03 are G1/G2/G3. \d+ is greedy, so what follows the digits
+        // is the first non-digit char: a letter means the word ended (G1X10
+        // still parses), a dot is a fractional non-motion code (G0.1, G91.1).
+        let Some(g) = re(r"^G(\d+)(.?)").captures(&ln) else { continue };
+        if &g[2] == "." { continue; }
+        let Ok(code) = g[1].parse::<u32>() else { continue };
+        let (is_g0, is_g1, is_g2, is_g3) = match code {
+            0 => (true, false, false, false),
+            1 => (false, true, false, false),
+            2 => (false, false, true, false),
+            3 => (false, false, false, true),
+            _ => continue,
+        };
         let num = |pat: &'static str| -> Option<f64> {
             re(pat).captures(&ln).and_then(|c| c[1].parse::<f64>().ok())
         };
@@ -113,46 +150,27 @@ pub fn parse_gcode(path: &str) -> Result<GcodeParsed, String> {
         let nz = num(r"Z(-?\d+(?:\.\d+)?)").unwrap_or(cz);
         let r_val = num(r"R(-?\d+(?:\.\d+)?)");
         if is_g0 {
-            points.push(Mv { x: cx, y: cy, z: cz, mt: Mt::Rapid });
-            points.push(Mv { x: nx, y: ny, z: nz, mt: Mt::Rapid });
+            push(Mt::Rapid, cx, cy, cz);
+            push(Mt::Rapid, nx, ny, nz);
         } else if is_g1 {
-            points.push(Mv { x: cx, y: cy, z: cz, mt: Mt::Cut });
-            points.push(Mv { x: nx, y: ny, z: nz, mt: Mt::Cut });
+            push(Mt::Cut, cx, cy, cz);
+            push(Mt::Cut, nx, ny, nz);
         } else if (is_g2 || is_g3) && r_val.is_some() {
             for (ax, ay) in arc_to_polyline(cx, cy, nx, ny, r_val.unwrap(), is_g2) {
-                points.push(Mv { x: ax, y: ay, z: cz, mt: Mt::Arc });
+                push(Mt::Arc, ax, ay, cz);
             }
         } else {
-            points.push(Mv { x: cx, y: cy, z: cz, mt: Mt::Cut });
-            points.push(Mv { x: nx, y: ny, z: nz, mt: Mt::Cut });
+            push(Mt::Cut, cx, cy, cz);
+            push(Mt::Cut, nx, ny, nz);
         }
         cx = nx; cy = ny; cz = nz;
     }
 
-    let mut counts = Counts::default();
-    for p in &points {
-        match p.mt { Mt::Rapid => counts.rapid += 1, Mt::Cut => counts.cut += 1, Mt::Arc => counts.arc += 1 }
-    }
-    let mut groups: Vec<(Mt, Vec<(f64, f64, f64)>)> = vec![];
-    for p in &points {
-        // python build_groups: consecutive runs of the same move type
-        if groups.last().map(|g| g.0 != p.mt).unwrap_or(true) {
-            groups.push((p.mt, vec![]));
-        }
-        groups.last_mut().unwrap().1.push((p.x, p.y, p.z));
-    }
-    let bounds = if points.is_empty() {
-        Bounds::default()
-    } else {
-        let (mut min_x, mut max_x, mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
-        for p in &points {
-            if p.x < min_x { min_x = p.x; }
-            if p.x > max_x { max_x = p.x; }
-            if p.y < min_y { min_y = p.y; }
-            if p.y > max_y { max_y = p.y; }
-        }
+    let bounds = if any {
         Bounds { min_x, max_x, min_y, max_y }
+    } else {
+        Bounds::default()
     };
-    Ok(GcodeParsed { points, groups, counts, bounds })
+    Ok(GcodeParsed { groups, counts, bounds })
 }
 

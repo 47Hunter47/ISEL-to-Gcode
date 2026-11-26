@@ -1,9 +1,9 @@
 // Toolpath preview scene data: the projection math python `open_preview()`
 // used (isel_to_gcode_gui.py lines 216-490) survives here as plain data, so it
 // stays testable headless and the preview window only paints what it is given.
-// shortcut: the whole scene is rebuilt per view event (pan/zoom/fit) instead of
-// keeping a camera in the front end; move projection client-side if panning
-// ever stutters over IPC.
+// The scene is rebuilt when the file, view mode, or viewport changes (and on
+// Fit); pan/zoom are a canvas transform in the front end over the projected
+// scene, so a drag or wheel tick never crosses IPC.
 
 use crate::gcode::{GcodeParsed, Mt};
 use serde::{Deserialize, Serialize};
@@ -73,22 +73,25 @@ fn project(cam: &Camera, iso: bool, w: (f64, f64, f64)) -> [f32; 2] {
 }
 
 /// Bounds of the projected shape, origin-free (python `projected_bounds`).
+/// Every point lives in `data.groups` exactly once, so one walk covers all.
 fn projected_bounds(data: &GcodeParsed, iso: bool) -> (f32, f32, f32, f32) {
     let (mut min_px, mut max_px) = (f32::INFINITY, f32::NEG_INFINITY);
     let (mut min_py, mut max_py) = (f32::INFINITY, f32::NEG_INFINITY);
-    for p in &data.points {
-        let (wx, wy, wz) = (p.x as f32, p.y as f32, p.z as f32);
-        let (px, py) = if iso {
-            let c = 30f32.to_radians().cos();
-            let s = 30f32.to_radians().sin();
-            ((wx - wy) * c, (wx + wy) * s - wz)
-        } else {
-            (wx, -wy)
-        };
-        min_px = min_px.min(px);
-        max_px = max_px.max(px);
-        min_py = min_py.min(py);
-        max_py = max_py.max(py);
+    for (_, pts) in &data.groups {
+        for w in pts {
+            let (wx, wy, wz) = (w.0 as f32, w.1 as f32, w.2 as f32);
+            let (px, py) = if iso {
+                let c = 30f32.to_radians().cos();
+                let s = 30f32.to_radians().sin();
+                ((wx - wy) * c, (wx + wy) * s - wz)
+            } else {
+                (wx, -wy)
+            };
+            min_px = min_px.min(px);
+            max_px = max_px.max(px);
+            min_py = min_py.min(py);
+            max_py = max_py.max(py);
+        }
     }
     (min_px, max_px, min_py, max_py)
 }
@@ -151,6 +154,10 @@ pub fn scene(
 
 /// Grid step, lines and labels from the old `Preview::draw_grid`, returned as
 /// data instead of painted. The zero axes come back as grid lines too.
+/// The step is grown a second time if needed so the total line count is
+/// bounded: at extreme zoom the 50px target step iterates billions of times.
+const GRID_LINE_CAP: f64 = 500.0; // per axis; the toolpath, not the grid, is the point
+
 fn draw_grid(
     data: &GcodeParsed,
     cam: &Camera,
@@ -170,6 +177,11 @@ fn draw_grid(
             break;
         }
     }
+    // cap: lines per axis is span/step, so a floor on the step bounds the loop
+    // (NaN never arrives: bounds and step are finite once scale is finite)
+    let span_x = (b.max_x - b.min_x).max(0.0);
+    let span_y = (b.max_y - b.min_y).max(0.0);
+    grid_step = grid_step.max(span_x / GRID_LINE_CAP).max(span_y / GRID_LINE_CAP);
     let mut gx = (b.min_x / grid_step).floor() * grid_step;
     while gx <= b.max_x + grid_step {
         let p = project(cam, false, (gx, 0.0, 0.0));
@@ -196,17 +208,14 @@ fn draw_grid(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gcode::{Bounds, Counts, Mv, Mt};
+    use crate::gcode::{Bounds, Counts, Mt};
 
     fn sample() -> GcodeParsed {
-        let pts = vec![
-            Mv { x: 0.0, y: 0.0, z: 0.0, mt: Mt::Rapid },
-            Mv { x: 100.0, y: 0.0, z: 0.0, mt: Mt::Cut },
-            Mv { x: 100.0, y: 50.0, z: 0.0, mt: Mt::Cut },
-        ];
         GcodeParsed {
-            points: pts,
-            groups: vec![(Mt::Cut, vec![(0.0, 0.0, 0.0), (100.0, 0.0, 0.0), (100.0, 50.0, 0.0)])],
+            groups: vec![
+                (Mt::Rapid, vec![(0.0, 0.0, 0.0), (0.0, 0.0, 0.0)]),
+                (Mt::Cut, vec![(0.0, 0.0, 0.0), (100.0, 0.0, 0.0), (100.0, 50.0, 0.0)]),
+            ],
             counts: Counts { rapid: 1, cut: 2, arc: 0 },
             bounds: Bounds { min_x: 0.0, max_x: 100.0, min_y: 0.0, max_y: 50.0 },
         }
@@ -250,6 +259,36 @@ mod tests {
         };
         let after = project(&zoomed, false, anchor_world);
         assert!((after[0] - before[0]).abs() < 0.01 && (after[1] - before[1]).abs() < 0.01);
+    }
+
+    #[test]
+    fn extreme_zoom_and_degenerate_viewports_keep_grid_work_bounded() {
+        // 1e9 px/mm over a 100mm shape: the 50px step target alone would ask
+        // for ~10^10 vertical lines. The cap must grow the step instead.
+        let cam = Camera { ox: 0.0, oy: 0.0, scale: 1e9 };
+        let sc = scene(&sample(), 800.0, 600.0, false, Some(&cam));
+        assert!(sc.grid.len() <= 2 * 500 + 2, "grid {}", sc.grid.len());
+        assert!(sc.labels.len() <= 2 * 500 + 2, "labels {}", sc.labels.len());
+        // tiny viewport on the same data: no panic, still bounded
+        let sc1 = scene(&sample(), 1.0, 1.0, false, Some(&cam));
+        assert!(sc1.grid.len() <= 2 * 500 + 2);
+        // zoom far out: step explodes instead of the count; axes are always drawn
+        let tiny = Camera { ox: 0.0, oy: 0.0, scale: 1e-9 };
+        let sc2 = scene(&sample(), 800.0, 600.0, false, Some(&tiny));
+        assert!(!sc2.grid.is_empty() && sc2.grid.len() <= 2 * 500 + 2, "grid {}", sc2.grid.len());
+    }
+
+    #[test]
+    fn normal_zoom_grid_is_unchanged() {
+        // the cap may only bite at extremes: at a fitted view the step stays
+        // the python 50px target (demo2 fits ~18 lines/axis into an 800px view)
+        let data = crate::gcode::parse_gcode(
+            &(concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/").to_string() + "/demo2_expected.g1.ngc"))
+            .expect("parse golden");
+        let cam = fit(&data, false, 800.0, 600.0);
+        let sc = scene(&data, 800.0, 600.0, false, Some(&cam));
+        let lines: usize = sc.grid.iter().filter(|g| g.color == COLOR_GRID).count();
+        assert!(lines > 0 && lines < 100, "grid lines {}", lines);
     }
 }
 

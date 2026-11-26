@@ -137,3 +137,54 @@ fn run(text: &str, arc: bool) -> (String, Vec<String>, f64) {
     assert!(!ngc.contains("G1 X33.090"), "polyline points consumed by the fit");
     assert!(ngc.contains("G3 X20.000 Y20.000 R7.211 F500")); // CWABS/CCWABS arcs still work
 }
+
+// ── arc Z semantics ─────────────────────────────────────────────────────────
+// ISEL NCP circle interpolation is planar (isel RemoteWin manual §3.3/3.4: arcs
+// run in the active interpolation plane; helical motion has no NCP command).
+// A CWABS/CCWABS whose Z differs from the current height is unsupported input
+// and is skipped with a warning in *both* output modes; the height change then
+// survives as its own MOVEABS Z instead of being lost inside the arc.
+
+/// Half circle (10,0)->(10,10) r≈11.18 around (0,5) climbing to Z-2.
+const ARC_Z_UP: &str = "VEL 16667\n\
+MOVEABS X0 Y0 Z-1000\nMOVEABS X10000 Y0 Z-1000\n\
+CWABS X10000 Y10000 I0 J5000 Z-2000\n\
+MOVEABS X20000 Y10000 Z-2000\n";
+
+#[test]
+fn arc_with_z_change_is_skipped_with_a_warning_in_g1_mode() {
+    let (ngc, logs, _) = run(ARC_Z_UP, false);
+    assert!(logs.iter().any(|l| l.contains("arc with Z change skipped")), "{:?}", logs);
+    // skipped means "nothing of it is emitted": the output equals the same
+    // program with the arc line deleted — no phantom geometry, and the climb
+    // to Z-2 survives as its own move instead of riding on arc endpoints
+    let without = ARC_Z_UP.replace("CWABS X10000 Y10000 I0 J5000 Z-2000\n", "");
+    let (want, _, _) = run(&without, false);
+    assert_eq!(ngc, want, "skipped arc must contribute no lines:\n{}", ngc);
+    assert!(ngc.contains("G1 X20.000 Y10.000 Z-2.000"), "Z lost:\n{}", ngc);
+}
+
+#[test]
+fn arc_with_z_change_is_skipped_with_a_warning_in_arc_mode() {
+    let (ngc, logs, _) = run(ARC_Z_UP, true);
+    assert!(logs.iter().any(|l| l.contains("arc with Z change skipped")), "{:?}", logs);
+    assert!(!ngc.contains("G2 ") && !ngc.contains("G3 "), "no G2/G3 from a skipped arc (G21 header excluded):\n{}", ngc);
+    assert!(ngc.contains("G1 X20.000 Y10.000 Z-2.000"), "Z lost:\n{}", ngc);
+}
+
+/// Repeating the current height on the arc is the isel manual's own example
+/// form: it must run and produce exactly the output of the arc without Z, in
+/// both modes, with no warning — byte-for-byte, cycle time included.
+#[test]
+fn arc_carrying_the_current_height_runs_unchanged() {
+    let with_z = "VEL 16667\nMOVEABS X0 Y0 Z-1000\nCWABS X10000 Y0 I5000 J0 Z-1000\n";
+    let bare = "VEL 16667\nMOVEABS X0 Y0 Z-1000\nCWABS X10000 Y0 I5000 J0\n";
+    let (a, logs_a, ta) = run(with_z, false);
+    let (b, _, tb) = run(bare, false);
+    assert_eq!(a, b, "redundant Z changed the output");
+    assert_eq!(ta, tb);
+    assert!(!logs_a.iter().any(|l| l.contains("Z change")), "{:?}", logs_a);
+    let (a2, _, _) = run(with_z, true);
+    let (b2, _, _) = run(bare, true);
+    assert_eq!(a2, b2, "arc mode too");
+}

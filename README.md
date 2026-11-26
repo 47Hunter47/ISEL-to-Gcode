@@ -53,6 +53,8 @@ M30
 
 The first spindle command is emitted **after** the first Z safe retract, so the spindle starts turning only once the tool is clear of the workpiece. Subsequent spindle speed changes are emitted immediately.
 
+ISEL arcs are flat XY circles. If a `CWABS`/`CCWABS` line asks for a height (`Z`) different from the current one, the arc is skipped and a warning is shown in the log, so a height change is never lost silently inside an arc.
+
 ## Building from source
 
 Requires Rust (the `src-tauri/rust-toolchain.toml` file pins the toolchain), on

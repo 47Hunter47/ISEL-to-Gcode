@@ -723,3 +723,240 @@ fn cli_keeps_its_flags() {
     assert_eq!(reduced(&plain), 0, "the original never puts F on a G1 line");
     assert!(reduced(&corners) > 0, "the sample's corners are reduced");
 }
+
+// ── review additions: noise amplitudes, dense genuine features, U-turn
+// ordering and feed recovery. Algorithm constants untouched; every number
+// below is what the current constants actually measure. ─────────────────────
+
+fn straight_with_noise(n: usize, step: f64, amp: f64, drift: bool) -> Vec<(f64, f64)> {
+    (0..n)
+        .map(|i| {
+            let x = i as f64 * step;
+            let y = if drift {
+                i as f64 * amp
+            } else if i % 2 == 0 {
+                amp
+            } else {
+                -amp
+            };
+            (x, y)
+        })
+        .collect()
+}
+
+/// A nominally straight line wobbled by up to 10 µm, at three segment
+/// lengths: the deviation must never reach the 12° turn floor once averaged
+/// over the 1 mm analysis window.
+#[test]
+fn alternating_noise_up_to_10_micron_keeps_full_feed() {
+    for amp in [0.001, 0.003, 0.005, 0.010] {
+        for step in [0.3, 2.0, 10.0] {
+            let p = analyze(&prog(&straight_with_noise(60, step, amp, false)));
+            assert_eq!(p.corners, 0, "amp {amp} step {step}: {:?}", p.factors);
+            assert_eq!(p.arcs, 0, "amp {amp} step {step}: {:?}", p.factors);
+        }
+    }
+}
+
+/// A constant lateral drift (2% slope) is a straight line: each 1 mm window
+/// turns 1.15°, under the floor, even after 100 mm of accumulated drift.
+#[test]
+fn slow_coordinate_drift_is_a_straight_line() {
+    let p = analyze(&prog(&straight_with_noise(400, 0.25, 0.005, true)));
+    assert_eq!(p.corners, 0, "{:?}", p.factors);
+    assert_eq!(p.arcs, 0);
+}
+
+/// Dense 0.05 mm steps wobbled by exactly the 0.01 snap pitch read straight
+/// everywhere except the two run ends: there the 1 mm window clamps short of
+/// the path and alternating noise cannot cancel, so a small edge artifact is
+/// pinned on purpose — the same clamp is what makes genuine run-start corners
+/// detectable (very_short_segments).
+#[test]
+fn dense_10_micron_noise_is_clean_between_the_run_ends() {
+    let pts = straight_with_noise(600, 0.05, 0.010, false);
+    let p = analyze(&prog(&pts));
+    assert!(p.corners <= 2, "dense noisy line found {} corners: {:?}", p.corners, p.factors);
+    assert_eq!(p.arcs, 0);
+    // the last three segments (pts.len()-4..pts.len()-1) are the clamped tail
+    let inner = (3..pts.len() - 4).map(|s| seg(&p, s)).fold(1.0f64, f64::min);
+    assert_eq!(inner, 1.0, "interior of a dense noisy straight was reduced: {:?}", p.factors);
+    for s in 0..pts.len() - 1 {
+        assert!(seg(&p, s) >= 0.93, "end artifact too strong at {s}");
+    }
+}
+
+fn corner_pts(deg: f64, jitter: bool) -> Vec<(f64, f64)> {
+    let a = deg.to_radians();
+    let mut p = vec![(0.0, 0.0), (10.0, 0.0), (10.0 + 10.0 * a.cos(), 10.0 * a.sin())];
+    if jitter {
+        p[1] = (10.002, -0.001);
+        p[2] = (p[2].0 - 0.003, p[2].1 + 0.002);
+    }
+    p
+}
+
+/// Corner reduction comes from geometry, not from the last digits of the
+/// coordinates: microns of endpoint jitter move a 45°..180° factor at most a
+/// hundredth, and every angle follows the published profile.
+#[test]
+fn jittered_corner_feeds_match_the_clean_profile() {
+    for (deg, want) in [(45.0, 0.75), (60.0, 0.6), (90.0, 0.4), (120.0, 0.3), (150.0, 0.25), (180.0, 0.25)] {
+        let clean = analyze(&prog(&corner_pts(deg, false)));
+        let jit = analyze(&prog(&corner_pts(deg, true)));
+        assert_eq!(jit.corners, 1, "{deg} degree corner lost to jitter");
+        let fc = seg(&clean, 0);
+        let fj = seg(&jit, 0);
+        assert!((fc - want).abs() <= 0.03, "{deg} clean factor {fc}, want {want}");
+        assert!((fj - fc).abs() <= 0.01, "{deg} jittered {fj} vs clean {fc}");
+    }
+}
+
+/// The review's 0.2 mm staircase (review C): X and Y steps of 0.2 mm
+/// alternating. Each vertex genuinely reverses 90° every 0.2 mm; read at the
+/// 1 mm window it could masquerade as one 45° diagonal — it must not. Every
+/// segment carries a reduction, and the toolpath bytes are identical.
+#[test]
+fn dense_staircase_turns_are_reduced_not_flattened() {
+    let mut pts = vec![(0.0, 0.0)];
+    for i in 1..=15 {
+        let (x, y) = pts[i - 1];
+        pts.push(if i % 2 == 1 { (x + 0.2, y) } else { (x, y + 0.2) });
+    }
+    let p = analyze(&prog(&pts));
+    assert!(p.corners >= 5, "staircase classified with only {} corners", p.corners);
+    for s in 0..15 {
+        let f = seg(&p, s);
+        assert!(f < 1.0 - 1e-9 && f >= 0.25 - 1e-9, "staircase segment {s} factor {f}");
+    }
+    let (on, _, _) = run(&prog(&pts), false, true);
+    let (off, _, _) = run(&prog(&pts), false, false);
+    assert_only_feeds_differ(&off, &on);
+    let fs = f_values(&on);
+    assert!(fs.iter().all(|&v| v <= FEED + 0.5) && fs.iter().any(|&v| v < 1000.0), "{on}");
+}
+
+fn u_turn_pts(r: f64, n: usize, noise: f64, uneven: bool) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    let mut seed: u32 = 12345;
+    for i in 0..=n {
+        // dropping interior even points alternates the segment lengths
+        if uneven && i > 2 && i < n && i % 2 == 0 {
+            continue;
+        }
+        let a = std::f64::consts::PI * i as f64 / n as f64;
+        let mut x = r * a.sin();
+        let mut y = r * (1.0 - a.cos());
+        if noise > 0.0 {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            x += 2.0 * noise * ((seed >> 8) as f64 / 16777216.0 - 0.5);
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            y += 2.0 * noise * ((seed >> 8) as f64 / 16777216.0 - 0.5);
+        }
+        out.push((x, y));
+    }
+    out
+}
+
+fn u_min_factor(r: f64, n: usize, noise: f64, uneven: bool) -> f64 {
+    let p = analyze(&prog(&u_turn_pts(r, n, noise, uneven)));
+    p.factors.values().copied().fold(1.0f64, f64::min)
+}
+
+/// U-turns must separate by radius (1.5 mm cuts deeper than 4 mm), and the
+/// 4 mm result must not move under 2 µm coordinate noise or uneven segment
+/// lengths. The 40 mm case (no reduction at all) is pinned elsewhere.
+#[test]
+fn u_turn_reduction_tracks_radius_and_survives_noise() {
+    let tight = u_min_factor(1.5, 60, 0.0, false);
+    let medium = u_min_factor(4.0, 60, 0.0, false);
+    assert!(tight < medium - 0.1, "tight {tight} must undercut medium {medium}");
+    assert!(medium < 1.0 - 1e-9, "medium U-turn ran at full feed");
+    let noisy = u_min_factor(4.0, 60, 0.002, false);
+    assert!((noisy - medium).abs() <= 0.02, "2 micron noise moved feed {noisy} vs {medium}");
+    let uneven = u_min_factor(4.0, 60, 0.0, true);
+    assert!((uneven - medium).abs() <= 0.05, "uneven segments moved feed {uneven} vs {medium}");
+
+    let (on, _, _) = run(&prog(&u_turn_pts(4.0, 60, 0.0, true)), false, true);
+    let (off, _, _) = run(&prog(&u_turn_pts(4.0, 60, 0.0, true)), false, false);
+    assert_only_feeds_differ(&off, &on);
+}
+
+/// Long straights, a 90° corner, a tangent-blended r3 quarter arc and a 1 mm
+/// square notch in one program: each feature reduces only its neighbourhood,
+/// feed recovers to full between them, the geometry bytes are identical, and
+/// the rapid stays a rapid.
+#[test]
+fn mixed_path_reduces_features_and_recovers_full_feed() {
+    let mut pts = vec![(0.0, 0.0), (20.0, 0.0), (40.0, 0.0), (40.0, 15.0), (40.0, 30.0), (43.0, 30.0)];
+    for k in 1..=6 {
+        let a = k as f64 * 15.0f64.to_radians();
+        pts.push((43.0 + 3.0 * a.sin(), 33.0 - 3.0 * a.cos()));
+    }
+    pts.extend([
+        (56.0, 33.0),
+        (66.0, 33.0),
+        (67.0, 33.0),
+        (67.0, 34.0),
+        (68.0, 34.0),
+        (68.0, 33.0),
+        (78.0, 33.0),
+        (88.0, 33.0),
+        (98.0, 33.0),
+    ]);
+    let p = analyze(&prog(&pts));
+    assert!((seg(&p, 0) - 1.0).abs() < 1e-9, "feed dropped 20 mm before any feature");
+    for s in 1..=4 {
+        assert!(seg(&p, s) <= 0.4 + 1e-6, "90 degree corner segment {s}: {}", seg(&p, s));
+    }
+    for s in 5..=11 {
+        let f = seg(&p, s);
+        assert!(f < 1.0 - 1e-9 && f >= 0.25 - 1e-6, "r3 arc segment {s}: {f}");
+    }
+    assert!(seg(&p, 12) >= 0.98, "no feed recovery before the notch: {}", seg(&p, 12));
+    for s in 13..=17 {
+        assert!(seg(&p, s) <= 0.45, "notch segment {s}: {}", seg(&p, s));
+    }
+    assert!((seg(&p, 18) - 1.0).abs() < 1e-9, "feed not restored after the notch");
+    assert!((seg(&p, 19) - 1.0).abs() < 1e-9, "feed not restored after the notch");
+
+    let (on, _, _) = run(&prog(&pts), false, true);
+    let (off, _, _) = run(&prog(&pts), false, false);
+    assert_only_feeds_differ(&off, &on);
+    let fs = f_values(&on);
+    assert!(fs.iter().all(|&v| v <= FEED + 0.5), "corner feature raised a feed: {on}");
+    assert!(fs.iter().any(|&v| (v - 1000.0).abs() < 0.5), "output never restored base feed");
+    assert!(
+        on.lines().filter(|l| l.starts_with("G0")).all(|l| !l.contains('F')),
+        "a rapid carries a feed word: {on}"
+    );
+}
+
+/// Feed reductions compose with VEL: a corner scales against the feed active
+/// for *its* lines. The path is a box — 90° corners at (10,0), (10,10),
+/// (25,10) and (25,20) — so the corner at (25,10) sits after the VEL change
+/// and slows against 2000 (0.4·2000 = 800), never 1000. The 3 mm ramp leaving
+/// the first corner prints 700; the 10 mm final line is beyond the ramp
+/// window (≤4 mm) and restores the active base feed.
+#[test]
+fn corner_after_a_vel_change_slows_relative_to_the_new_base() {
+    let text = "VEL 16667\n\
+                MOVEABS X0 Y0\nMOVEABS X10000 Y0\n\
+                MOVEABS X10000 Y10000\n\
+                MOVEABS X14000 Y10000\n\
+                MOVEABS X17000 Y10000\n\
+                VEL 33333\n\
+                MOVEABS X25000 Y10000\n\
+                MOVEABS X25000 Y20000\n\
+                MOVEABS X28000 Y20000\n\
+                MOVEABS X38000 Y20000\n";
+    let (on, _, _) = run(text, false, true);
+    let (off, _, _) = run(text, false, false);
+    assert_only_feeds_differ(&off, &on);
+    let fs = f_values(&on);
+    for want in [400.0, 700.0, 800.0] {
+        assert!(fs.iter().any(|v| (*v - want).abs() < 0.5), "{want} missing: {on}");
+    }
+    assert!(fs.iter().all(|&v| v <= 2000.0 + 0.5), "{on}");
+    assert_eq!(on.matches(" F2000").count(), 2, "the VEL line and the restore: {on}");
+}

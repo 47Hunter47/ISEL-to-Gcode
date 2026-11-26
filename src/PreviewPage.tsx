@@ -4,12 +4,15 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { api } from "./lib/api";
-import type { Camera, GcodeParsed, PreviewScene } from "./lib/types";
+import type { Camera, GcodeSummary, PreviewScene } from "./lib/types";
 
-// Canvas paints exactly what preview.rs projects; the only client-side math is
-// the pan offset and the 3-line anchor zoom (mirror of preview.rs's
-// zoom_at / preview.rs's test pins that formula). Keeping pan client-side
-// means a drag never waits on an IPC round trip.
+// Canvas paints exactly what preview.rs projects, redrawn under a single
+// client-side translate+scale: screen' = cam.ox + (cam.scale/base.scale) *
+// (screen - base.ox), which is project()'s own world->screen semantics seen
+// from the base camera the server fitted. So the 3-line anchor zoom (mirror
+// of preview.rs's zoom_at, pinned by preview.rs's test) and panning stay
+// client-side and never re-project points or cross IPC; the server scene is
+// only re-requested for a new file, the ISO toggle, a resize refit, or Fit.
 // The label color mirrors preview.rs's python-side TEXT_FAINT (#2F5F73).
 const LABEL_COLOR = "#2F5F73";
 const nf = new Intl.NumberFormat("en-US");
@@ -20,48 +23,135 @@ export default function PreviewPage() {
   const [path, setPath] = useState(pathFromUrl);
   const [iso, setIso] = useState(false);
   const [scene, setScene] = useState<PreviewScene | null>(null);
-  const [stats, setStats] = useState<GcodeParsed | null>(null);
+  const [stats, setStats] = useState<GcodeSummary | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const camRef = useRef<Camera | null>(null); // null asks the server to fit
-  const inFlight = useRef(false);
-  const dirty = useRef(false);
+  // Latest-request-wins queue: every view change bumps want.rev with the state
+  // to request. One IPC flight at a time; after each response the flight
+  // re-reads want, so a newer path/iso/camera always runs — a request is never
+  // dropped and never replayed from a stale closure. A response may adopt its
+  // server camera only when its request asked for a fit (cam null); otherwise
+  // the camera on screen is the user's and an obsolete response must not roll
+  // back a pan/zoom that happened mid-flight (preview.rs echoes sent cameras).
+  const want = useRef({ path: "", iso: false, cam: null as Camera | null, rev: 0 });
+  const applied = useRef(0);
+  const running = useRef(false);
   const drag = useRef<{ x: number; y: number } | null>(null);
 
-  const request = useCallback(async () => {
+  const request = useCallback((patch?: { path?: string; iso?: boolean }) => {
+    if (patch) Object.assign(want.current, patch);
+    want.current.cam = camRef.current;
+    want.current.rev += 1;
+    if (running.current) return; // the live flight will re-read want when it lands
+    running.current = true;
+    void (async () => {
+      try {
+        while (applied.current !== want.current.rev) {
+          const canvas = canvasRef.current;
+          if (!canvas) break;
+          const w = { ...want.current }; // snapshot: this flight is about w
+          const { width, height } = canvas.getBoundingClientRect();
+          const s = await api.previewScene({
+            path: w.path,
+            width: Math.max(1, Math.round(width)),
+            height: Math.max(1, Math.round(height)),
+            iso: w.iso,
+            camera: w.cam,
+          });
+          applied.current = w.rev;
+          if (w.cam === null) camRef.current = s.camera;
+          setScene(s);
+        }
+      } catch (e) {
+        console.error("preview_view failed:", e);
+      } finally {
+        running.current = false;
+      }
+    })();
+  }, []);
+
+  // paint everything the Rust scene carries; only the camera transform is
+  // applied here (see the file header — same semantics as project())
+  const rafRef = useRef(0);
+  const paint = useCallback(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    if (inFlight.current) {
-      dirty.current = true; // coalesce rapid pan/zoom events into one view per round trip
-      return;
+    if (!canvas || !scene) return;
+    const dpr = window.devicePixelRatio || 1;
+    const { width, height } = canvas.getBoundingClientRect();
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const base = scene.camera;
+    const cam = camRef.current ?? base;
+    const a = cam.scale / base.scale;
+    const e = cam.ox - a * base.ox;
+    const f = cam.oy - a * base.oy;
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = scene.background;
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.setTransform(dpr * a, 0, 0, dpr * a, dpr * e, dpr * f);
+    ctx.lineWidth = 1 / a; // strokes keep their 1px visual weight under scale
+    for (const g of scene.grid) {
+      ctx.strokeStyle = g.color;
+      ctx.beginPath();
+      ctx.moveTo(g.x1, g.y1);
+      ctx.lineTo(g.x2, g.y2);
+      ctx.stroke();
     }
-    inFlight.current = true;
-    try {
-      do {
-        dirty.current = false;
-        const { width, height } = canvas.getBoundingClientRect();
-        const s = await api.previewScene({
-          path,
-          width: Math.max(1, Math.round(width)),
-          height: Math.max(1, Math.round(height)),
-          iso,
-          camera: camRef.current,
-        });
-        camRef.current = s.camera;
-        setScene(s);
-      } while (dirty.current);
-    } catch (e) {
-      console.error("preview_view failed:", e);
-    } finally {
-      inFlight.current = false;
+
+    // labels follow their grid line but stay 7px: the text is a world
+    // coordinate, so only its position belongs to the transform
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = LABEL_COLOR;
+    ctx.font = "7px monospace";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+    for (const l of scene.labels) ctx.fillText(l.text, a * l.x + e, a * l.y + f);
+
+    ctx.setTransform(dpr * a, 0, 0, dpr * a, dpr * e, dpr * f);
+    for (const line of scene.lines) {
+      ctx.strokeStyle = line.color;
+      ctx.beginPath();
+      line.points.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
+      ctx.stroke();
     }
-  }, [path, iso]);
+  }, [scene]);
+
+  const schedulePaint = useCallback(() => {
+    // one repaint per frame, however many wheel/move events arrive
+    if (rafRef.current) return;
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = 0;
+      paint();
+    });
+  }, [paint]);
 
   useEffect(() => {
-    camRef.current = null; // new file: refit
-    api.parseGcode(path).then(setStats).catch(() => setStats(null));
-    request();
-  }, [path, request]);
+    paint();
+  }, [paint]);
+
+  useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
+
+  const statsReq = useRef(0);
+  useEffect(() => {
+    const my = ++statsReq.current; // ignore stats from an obsolete file
+    api.previewStats(path)
+      .then((s) => {
+        if (statsReq.current === my) setStats(s);
+      })
+      .catch(() => {
+        if (statsReq.current === my) setStats(null);
+      });
+  }, [path]);
+
+  useEffect(() => {
+    camRef.current = null; // new file or view change: refit
+    request({ path, iso });
+  }, [path, iso, request]);
 
   // refit when the window resizes, like the old rect-change refit
   useEffect(() => {
@@ -96,11 +186,11 @@ export default function PreviewPage() {
       const cy = e.clientY - rect.top;
       const f = e.deltaY > 0 ? 1 / 1.15 : 1.15; // wheel up = zoom in (python parity)
       camRef.current = { ox: cx + (cam.ox - cx) * f, oy: cy + (cam.oy - cy) * f, scale: cam.scale * f };
-      request();
+      schedulePaint(); // client-side only: the canvas transform does the zoom
     };
     canvas.addEventListener("wheel", onWheel, { passive: false });
     return () => canvas.removeEventListener("wheel", onWheel);
-  }, [request]);
+  }, [schedulePaint]);
 
   const onMouseDown = (e: React.MouseEvent) => {
     drag.current = { x: e.clientX, y: e.clientY };
@@ -110,7 +200,7 @@ export default function PreviewPage() {
       if (!cam || !d) return;
       camRef.current = { ...cam, ox: cam.ox + (ev.clientX - d.x), oy: cam.oy + (ev.clientY - d.y) };
       drag.current = { x: ev.clientX, y: ev.clientY };
-      request();
+      schedulePaint(); // client-side only: dragging is a canvas translation
     };
     const onUp = () => {
       drag.current = null;
@@ -120,42 +210,6 @@ export default function PreviewPage() {
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
   };
-
-  // paint everything the Rust scene carries; nothing is recomputed here
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !scene) return;
-    const dpr = window.devicePixelRatio || 1;
-    const { width, height } = canvas.getBoundingClientRect();
-    canvas.width = Math.round(width * dpr);
-    canvas.height = Math.round(height * dpr);
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = scene.background;
-    ctx.fillRect(0, 0, width, height);
-
-    ctx.lineWidth = 1;
-    for (const g of scene.grid) {
-      ctx.strokeStyle = g.color;
-      ctx.beginPath();
-      ctx.moveTo(g.x1, g.y1);
-      ctx.lineTo(g.x2, g.y2);
-      ctx.stroke();
-    }
-    ctx.fillStyle = LABEL_COLOR;
-    ctx.font = "7px monospace";
-    ctx.textAlign = "left";
-    ctx.textBaseline = "alphabetic";
-    for (const l of scene.labels) ctx.fillText(l.text, l.x, l.y);
-
-    for (const line of scene.lines) {
-      ctx.strokeStyle = line.color;
-      ctx.beginPath();
-      line.points.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
-      ctx.stroke();
-    }
-  }, [scene]);
 
   const b = stats?.bounds;
   const legend = (color: string, name: string) => (

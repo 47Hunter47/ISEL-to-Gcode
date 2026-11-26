@@ -10,7 +10,6 @@
 
 use crate::convert::convert_file;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, webview::WebviewWindowBuilder};
 
@@ -20,11 +19,38 @@ pub const PREVIEW_LABEL: &str = "preview";
 /// (Windows "Open with" / drag onto the exe), like app.rs's `prefill`.
 pub struct Prefill(pub Option<String>);
 
-/// preview_view rebuilds the scene on every pan/zoom event; re-parsing the
-/// G-code each time would stutter on big programs, so the parse result is
-/// cached per path. `convert` drops its output path from the cache, so a fresh
-/// conversion is never previewed stale.
-pub struct GcodeCache(pub Mutex<HashMap<String, crate::gcode::GcodeParsed>>);
+/// Preview_view rebuilds the scene on every fit/resize/view request; re-parsing
+/// the G-code each time would stutter on big programs, so the parse result is
+/// kept for the file currently previewed. One entry only: switching files
+/// replaces it, so memory never grows with the number of previewed programs.
+/// `convert` drops its output path from the cache, so a fresh conversion is
+/// never previewed stale.
+pub struct GcodeCache(pub Mutex<Option<(String, crate::gcode::GcodeParsed)>>);
+
+impl GcodeCache {
+    /// Run `f` with the parse of `path`, parsing (and replacing the cached
+    /// entry) on a miss. Parsing inside the lock serialises concurrent opens
+    /// of the same file: exactly one of them parses.
+    fn with_parsed<T>(&self, path: &str, f: impl FnOnce(&crate::gcode::GcodeParsed) -> Result<T, String>) -> Result<T, String> {
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if map.as_ref().map(|(p, _)| p != path).unwrap_or(true) {
+            let parsed = crate::gcode::parse_gcode(path)?;
+            *map = Some((path.to_string(), parsed));
+        }
+        f(&map.as_ref().unwrap().1)
+    }
+}
+
+/// The validation `start_convert` in app.rs ran before asking where to save.
+fn check_input_plan(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("No input file selected".into());
+    }
+    if !std::path::Path::new(path).is_file() {
+        return Err(format!("File not found: {}", path));
+    }
+    Ok(())
+}
 
 #[derive(Clone, Serialize)]
 struct LogMsg {
@@ -51,17 +77,6 @@ struct FailedMsg {
 #[derive(Clone, Serialize)]
 struct LoadPath {
     path: String,
-}
-
-/// The validation `start_convert` in app.rs ran before asking where to save.
-fn check_input_plan(path: &str) -> Result<(), String> {
-    if path.is_empty() {
-        return Err("No input file selected".into());
-    }
-    if !std::path::Path::new(path).is_file() {
-        return Err(format!("File not found: {}", path));
-    }
-    Ok(())
 }
 
 #[tauri::command]
@@ -121,7 +136,11 @@ pub async fn convert(
     .await
     .map_err(|e| format!("Conversion task failed: {e}"))?;
     if let Some(cache) = app.try_state::<GcodeCache>() {
-        cache.0.lock().unwrap_or_else(|e| e.into_inner()).remove(&out_for_cache);
+        let mut map = cache.0.lock().unwrap_or_else(|e| e.into_inner());
+        // the output was just rewritten: a cached parse of that path is stale
+        if map.as_ref().map(|(p, _)| p == &out_for_cache).unwrap_or(false) {
+            *map = None;
+        }
     }
     Ok(())
 }
@@ -138,9 +157,22 @@ pub fn get_version() -> &'static str {
     crate::app::APP_VERSION
 }
 
+/// gcode::Counts + gcode::Bounds: everything the preview window's stats bar
+/// shows, without serializing the geometry to the front end twice.
+#[derive(Serialize)]
+pub struct GcodeSummary {
+    pub counts: crate::gcode::Counts,
+    pub bounds: crate::gcode::Bounds,
+}
+
 #[tauri::command]
-pub async fn parse_gcode(path: String) -> Result<crate::gcode::GcodeParsed, String> {
-    crate::gcode::parse_gcode(&path)
+pub async fn preview_stats(
+    path: String,
+    cache: tauri::State<'_, GcodeCache>,
+) -> Result<GcodeSummary, String> {
+    cache.with_parsed(&path, |d| {
+        Ok(GcodeSummary { counts: d.counts, bounds: d.bounds })
+    })
 }
 
 #[derive(Deserialize)]
@@ -158,23 +190,30 @@ pub async fn preview_view(
     req: PreviewReq,
     cache: tauri::State<'_, GcodeCache>,
 ) -> Result<crate::preview::PreviewScene, String> {
-    let mut map = cache.0.lock().unwrap_or_else(|e| e.into_inner());
-    if !map.contains_key(&req.path) {
-        map.insert(req.path.clone(), crate::gcode::parse_gcode(&req.path)?);
-    }
-    let data = map.get(&req.path).unwrap();
-    Ok(crate::preview::scene(data, req.width, req.height, req.iso, req.camera.as_ref()))
+    cache.with_parsed(&req.path, |d| {
+        Ok(crate::preview::scene(d, req.width, req.height, req.iso, req.camera.as_ref()))
+    })
 }
 
-/// Mirror of app.rs `open_preview` decision making: a missing output is a
-/// silent no-op, an empty program is a message instead of a window.
-fn open_preview_plan(path: &str) -> Result<Option<String>, String> {
+/// What opening a preview decided, with the parse it needed already done:
+/// a missing output is a silent no-op, an empty program is a message instead
+/// of a window, and a parse with moves comes back here so the preview window
+/// never parses the same file a second time.
+enum OpenPlan {
+    Missing,
+    NoMoves,
+    Parsed(crate::gcode::GcodeParsed),
+}
+
+const NO_MOVES_MSG: &str = "No moves found in G-code file.";
+
+fn open_preview_plan(path: &str) -> Result<OpenPlan, String> {
     if !std::path::Path::new(path).is_file() {
-        return Ok(None);
+        return Ok(OpenPlan::Missing);
     }
     match crate::gcode::parse_gcode(path) {
-        Ok(data) if data.points.is_empty() => Ok(Some("No moves found in G-code file.".into())),
-        Ok(_) => Ok(None),
+        Ok(data) if data.has_moves() => Ok(OpenPlan::Parsed(data)),
+        Ok(_) => Ok(OpenPlan::NoMoves),
         Err(e) => Err(format!("Could not read G-code:\n{}", e)),
     }
 }
@@ -182,8 +221,14 @@ fn open_preview_plan(path: &str) -> Result<Option<String>, String> {
 /// The preview lives in its own OS window (like app.rs's separate viewport).
 /// Returns a message the front end must show instead of opening (empty file).
 pub fn open_preview(app: &AppHandle, path: String) -> Result<Option<String>, String> {
-    if let Some(msg) = open_preview_plan(&path)? {
-        return Ok(Some(msg));
+    let parsed = match open_preview_plan(&path)? {
+        OpenPlan::Missing => return Ok(None),
+        OpenPlan::NoMoves => return Ok(Some(NO_MOVES_MSG.to_string())),
+        OpenPlan::Parsed(data) => data,
+    };
+    // seed the preview cache with the parse this decision already paid for
+    if let Some(cache) = app.try_state::<GcodeCache>() {
+        *cache.0.lock().unwrap_or_else(|e| e.into_inner()) = Some((path.clone(), parsed));
     }
     let title = format!(
         "Path Preview \u{2014} {}",
@@ -248,7 +293,7 @@ mod tests {
     fn open_preview_reports_missing_file_without_a_window() {
         // silent no-op, exactly like app.rs's open_preview (its test of the
         // same name): missing output never opens anything, never talks.
-        assert_eq!(open_preview_plan("C:/definitely/not/here.ngc").unwrap(), None);
+        assert!(matches!(open_preview_plan("C:/definitely/not/here.ngc"), Ok(OpenPlan::Missing)));
     }
 
     #[test]
@@ -257,14 +302,16 @@ mod tests {
         let path = dir.join(format!("isel_empty_{}.ngc", std::process::id()));
         std::fs::write(&path, "M30\n").unwrap();
         let r = open_preview_plan(&path.to_string_lossy()).unwrap();
-        assert_eq!(r.as_deref(), Some("No moves found in G-code file."));
+        assert!(matches!(r, OpenPlan::NoMoves));
+        // the python port's wording, pinned verbatim
+        assert_eq!(NO_MOVES_MSG, "No moves found in G-code file.");
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn open_preview_on_real_golden_opens_window() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/sample_expected.arcs.ngc");
-        assert_eq!(open_preview_plan(path).unwrap(), None);
+        assert!(matches!(open_preview_plan(path), Ok(OpenPlan::Parsed(_))));
     }
 
     #[test]
@@ -273,12 +320,56 @@ mod tests {
         // numbers are skipped, exactly as the egui preview did; only file
         // access can fail. Cargo.toml is used as a real junk file.
         let r = open_preview_plan(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap();
-        assert_eq!(r.as_deref(), Some("No moves found in G-code file."));
+        assert!(matches!(r, OpenPlan::NoMoves));
     }
 
     #[test]
     fn percent_encode_escapes_url_breakers() {
         assert_eq!(percent_encode("C:/parts/x y#z.isel"), "C:/parts/x%20y%23z.isel");
         assert_eq!(percent_encode("a/b:c-d.ngc"), "a/b:c-d.ngc");
+    }
+
+    #[test]
+    fn cache_serves_hits_and_keeps_one_entry() {
+        let dir = std::env::temp_dir();
+        let a = dir.join(format!("isel_cache_a_{}.ngc", std::process::id()));
+        let b = dir.join(format!("isel_cache_b_{}.ngc", std::process::id()));
+        std::fs::write(&a, "N1 G1 X10 Y10\n").unwrap();
+        std::fs::write(&b, "N1 G1 X20 Y30\n").unwrap();
+        let cache = GcodeCache(Mutex::new(None));
+        let ca = cache.with_parsed(&a.to_string_lossy(), |d| Ok(d.counts.cut)).unwrap();
+        let ca2 = cache.with_parsed(&a.to_string_lossy(), |d| Ok(d.counts.cut)).unwrap();
+        assert_eq!((ca, ca2), (2, 2));
+        let cb = cache.with_parsed(&b.to_string_lossy(), |d| Ok(d.counts.cut)).unwrap();
+        assert_eq!(cb, 2);
+        // single active entry: switching files evicted A, memory cannot grow
+        let g = cache.0.lock().unwrap();
+        assert_eq!(g.as_ref().unwrap().0, b.to_string_lossy());
+        drop(g);
+        // file replaced by path B again but content rewritten (what a fresh
+        // conversion does): a path hit on a dropped entry re-parses, and
+        // `convert` drops the entry for exactly that reason.
+        let mut g = cache.0.lock().unwrap();
+        g.take();
+        drop(g);
+        std::fs::write(&b, "N1 G1 X1 Y1\nN2 G1 X5 Y5\n").unwrap();
+        let cb2 = cache.with_parsed(&b.to_string_lossy(), |d| Ok(d.counts.cut)).unwrap();
+        assert_eq!(cb2, 4);
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
+    fn reopen_after_rewrite_sees_the_new_program() {
+        // open_preview_plan never answers from a cache: a re-converted output
+        // is re-parsed by the next open, whatever the cache held.
+        let dir = std::env::temp_dir();
+        let p = dir.join(format!("isel_stale_{}.ngc", std::process::id()));
+        std::fs::write(&p, "N1 G1 X10 Y10\n").unwrap();
+        let s = &p.to_string_lossy();
+        assert!(matches!(open_preview_plan(s).unwrap(), OpenPlan::Parsed(ref d) if d.counts.cut == 2));
+        std::fs::write(&p, "N1 G1 X10 Y10\nN2 G1 X20 Y20\n").unwrap();
+        assert!(matches!(open_preview_plan(s).unwrap(), OpenPlan::Parsed(ref d) if d.counts.cut == 4));
+        let _ = std::fs::remove_file(&p);
     }
 }

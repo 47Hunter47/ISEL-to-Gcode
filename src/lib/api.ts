@@ -1,7 +1,7 @@
 // Typed wrappers over every invoke of the Rust command layer. Argument object
 // keys are camelCase: tauri maps them to the snake_case command parameters.
 import { invoke } from "@tauri-apps/api/core";
-import type { DoneMsg, FailedMsg, GcodeParsed, LogMsg, PreviewReq, PreviewScene, ProgressMsg } from "./types";
+import type { DoneMsg, FailedMsg, GcodeSummary, LogMsg, PreviewReq, PreviewScene, ProgressMsg } from "./types";
 
 export const api = {
   checkInput: (path: string) => invoke<void>("check_input", { path }),
@@ -12,7 +12,7 @@ export const api = {
   getPrefill: () => invoke<string | null>("get_prefill"),
   getVersion: () => invoke<string>("get_version"),
   openPreview: (path: string) => invoke<string | null>("open_preview_window", { path }),
-  parseGcode: (path: string) => invoke<GcodeParsed>("parse_gcode", { path }),
+  previewStats: (path: string) => invoke<GcodeSummary>("preview_stats", { path }),
   previewScene: (req: PreviewReq) => invoke<PreviewScene>("preview_view", { req }),
 };
 

@@ -36,9 +36,9 @@ export interface PreviewScene {
   background: string;
 }
 
-// gcode::GcodeParsed (only the header fields the preview window paints).
-export interface GcodeParsed {
-  groups: [Mt, [number, number, number][]][];
+// commands::GcodeSummary — the stats bar's data only; the geometry stays on
+// the Rust side and arrives projected, inside PreviewScene.
+export interface GcodeSummary {
   counts: { rapid: number; cut: number; arc: number };
   bounds: { min_x: number; max_x: number; min_y: number; max_y: number };
 }

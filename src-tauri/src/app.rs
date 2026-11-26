@@ -4,7 +4,6 @@
 // appears they are the only evidence.
 
 use crate::commands::{self, GcodeCache, Prefill};
-use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -66,7 +65,7 @@ pub fn run_with(prefill: Option<String>) {
 
     let app = match tauri::Builder::default()
         .manage(Prefill(prefill.clone()))
-        .manage(GcodeCache(Mutex::new(HashMap::new())))
+        .manage(GcodeCache(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             commands::check_input,
             commands::pick_file,
@@ -74,7 +73,7 @@ pub fn run_with(prefill: Option<String>) {
             commands::convert,
             commands::get_prefill,
             commands::get_version,
-            commands::parse_gcode,
+            commands::preview_stats,
             commands::preview_view,
             commands::open_preview_window
         ])

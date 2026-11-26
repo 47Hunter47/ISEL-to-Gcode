@@ -740,6 +740,16 @@ pub fn convert_file(
             if let Some(v) = cc.get(&'Y') {
                 end.y = *v;
             }
+            // ISEL NCP circle interpolation is planar: the isel RemoteWin manual
+            // (§3.3/3.4) runs CWABS/CCWABS "in the active interpolation plane"
+            // (the converter always emits G17/XY), helical motion has no NCP
+            // command at all, and no real program ever put a Z on an arc (0 of
+            // 103 arcs across the fixtures). A Z that differs from the current
+            // height is therefore unsupported input: skip the arc loudly rather
+            // than guess between a helix and a silently dropped height change.
+            // Z equal to the current height is the manual's own example form and
+            // produces byte-identical output to omitting it.
+            let z_change = cc.get(&'Z').is_some() && cc[&'Z'] != c.last_pos.z;
             if let Some(v) = cc.get(&'Z') {
                 end.z = *v;
             }
@@ -751,6 +761,11 @@ pub fn convert_file(
             let r_check = (c.last_pos.x - center.x).hypot(c.last_pos.y - center.y);
             if r_check < 1e-6 {
                 log(&format!("Warning: zero-radius arc skipped on line [{}]", line));
+            } else if z_change {
+                log(&format!(
+                    "Warning: arc with Z change skipped on line [{}]: circle interpolation is planar",
+                    line
+                ));
             } else {
                 if c.use_arc {
                     batch.extend(c.arc_to_g2g3(c.last_pos, end, center, cw));
