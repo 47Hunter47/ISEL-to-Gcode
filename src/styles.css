@@ -1,13 +1,13 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-@import "@fontsource-variable/geist";
 
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
     --font-heading: var(--font-sans);
-    --font-sans: 'Geist Variable', sans-serif;
+    /* Win11 look = Segoe UI Variable (fluent spec); the Geist webfont is gone */
+    --font-sans: 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system, sans-serif;
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -83,42 +83,44 @@
     --sidebar-ring: oklch(0.708 0 0);
 }
 
+/* dark-only app on mica: the shadcn tokens carry the Windows 11 Fluent dark
+   palette (AGENTS.md colours rule; the toolpath palette lives in preview.rs) */
 .dark {
-    --background: oklch(0.145 0 0);
-    /* dark-only app: primary is the modern indigo accent, AGENTS.md colours rule */
-    --primary: #4f46e5;
-    --primary-foreground: #ffffff;
-    --ring: #6366f1;
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
+    /* the body sits on the mica backdrop; surfaces add their own translucency */
+    --background: transparent;
+    --foreground: #ffffff;
+    --card: #232323;
+    --card-foreground: #ffffff;
+    --popover: #232323;
+    --popover-foreground: #ffffff;
+    /* fluent accent: electric blue with black foreground (WCAG on #4cc2ff) */
+    --primary: #4cc2ff;
+    --primary-foreground: #000000;
     /* overridden above: keep the shadcn defaults out of the cascade */
     --primary-fallback: oklch(0.922 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
+    --secondary: rgba(255, 255, 255, 0.06);
+    --secondary-foreground: #ffffff;
+    --muted: #232323;
+    --muted-foreground: #a1a1aa;
+    --accent: rgba(255, 255, 255, 0.08);
+    --accent-foreground: #ffffff;
+    --destructive: #c42b1c;
+    --border: rgba(255, 255, 255, 0.07);
+    --input: #1f1f1f;
+    --ring: #4cc2ff;
     --chart-1: oklch(0.87 0 0);
     --chart-2: oklch(0.556 0 0);
     --chart-3: oklch(0.439 0 0);
     --chart-4: oklch(0.371 0 0);
     --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
+    --sidebar: transparent;
+    --sidebar-foreground: #ffffff;
+    --sidebar-primary: #4cc2ff;
+    --sidebar-primary-foreground: #000000;
+    --sidebar-accent: rgba(255, 255, 255, 0.08);
+    --sidebar-accent-foreground: #ffffff;
+    --sidebar-border: rgba(255, 255, 255, 0.07);
+    --sidebar-ring: #4cc2ff;
 }
 
 @layer base {
@@ -132,12 +134,54 @@
     @apply font-sans;
     }
 }
+
+/* desktop feel: nothing selects; only inputs and copyable log/dialog text do.
+   tabular figures so counters and mm values do not jitter while running */
+body {
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+input, textarea, .select-text {
+  user-select: text;
+}
+
+/* Windows 11 thin scrollbar (WebView2 is Chromium) */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.28); }
+
 /* UI chrome palette (single source; toolpath colours live in preview.rs) */
 @theme {
-  --color-isel-panel: #121214;
-  --color-isel-dialog: #1a1a1e;
-  --color-isel-deep: #0a0a0c;
+  --color-isel-panel: #191919;
+  --color-isel-dialog: #232323;
+  --color-isel-deep: #141414;
   --color-isel-log: #a8ecc8;
-  --color-isel-ok: #5fe0a8;
+  --color-isel-ok: #6ccb5f;
   --color-isel-err: #ff6b5a;
+  --color-fluent-accent: #4cc2ff;
+  --color-fluent-accent-hover: #42b2ec;
+  --color-fluent-close: #c42b1c;
+}
+
+/* fluent content cards: hover lifts the border, not the card */
+.fluent-card {
+  background-color: var(--color-isel-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 18px;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+.fluent-card:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+/* success status badge per the fluent spec */
+.fluent-badge-success {
+  background-color: rgba(108, 203, 95, 0.16);
+  color: #6ccb5f;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
 }

@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
-import { Loader2 } from "lucide-react";
+import { FileCog, Info, Loader2 } from "lucide-react";
 import Titlebar from "./Titlebar";
 import { api } from "./lib/api";
 import type { DoneMsg, FailedMsg, LogMsg, ProgressMsg } from "./lib/types";
@@ -35,6 +35,15 @@ const stem = (path: string) => {
 
 const modeLabel = (arcs: boolean) => (arcs ? "G2/G3 arc commands" : "G1 linearised");
 
+// sidebar nav: the converter is the app; "about" gives the fluent nav pattern
+// real content instead of a fake second page
+const NAV = [
+  { id: "converter", label: "Converter", icon: FileCog },
+  { id: "about", label: "About", icon: Info },
+] as const;
+
+type Page = (typeof NAV)[number]["id"];
+
 export default function App() {
   const [input, setInput] = useState("");
   const [useArc, setUseArc] = useState(false);
@@ -48,6 +57,7 @@ export default function App() {
   const [msg, setMsg] = useState<DialogMsg | null>(null);
   const [dropping, setDropping] = useState(false);
   const [version, setVersion] = useState("");
+  const [page, setPage] = useState<Page>("converter");
 
   const busy = converting || waitingDialog;
   // mirrors for the async callbacks (state inside closures goes stale)
@@ -74,6 +84,9 @@ export default function App() {
     unlistens.current.forEach((u) => u());
     unlistens.current = [];
   };
+
+  // bare-browser peek (no tauri host): skip the window IPC, keep the UI alive
+  const isTauri = "__TAURI_INTERNALS__" in window;
 
   const convert = async () => {
     const v = vals.current;
@@ -162,6 +175,7 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (!isTauri) return; // bare-browser peek: no IPC host to talk to
     api.getVersion().then(setVersion).catch(() => setVersion("?"));
     api.getPrefill().then((p) => {
       if (p) {
@@ -226,87 +240,123 @@ export default function App() {
         : "text-zinc-300";
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden rounded-lg border border-white/[0.08] bg-isel-panel/80 text-[13px] text-zinc-200 backdrop-blur-xl">
+    <div className="flex h-screen flex-col overflow-hidden rounded-lg border border-white/[0.08] text-[13px] text-zinc-200">
       <Titlebar version={version} />
 
-      <div className="flex-1 space-y-4 overflow-hidden p-4">
-        <div>
-          <Label className="text-[11px] tracking-widest text-zinc-500">ISEL FILE</Label>
-          <Input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            spellCheck={false}
-            className="mt-1 border-white/[0.08] bg-white/[0.03] font-mono text-[12px] text-zinc-100 placeholder:text-zinc-600"
-            placeholder="Drop an ISEL file here or click Browse"
-          />
-        </div>
+      <div className="flex min-h-0 flex-1">
+        {/* sidebar sits straight on the mica; lighter than the content surface */}
+        <nav className="flex w-[220px] shrink-0 flex-col gap-1 bg-white/[0.02] p-3 select-none">
+          {NAV.map((item) => {
+            const active = page === item.id;
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.id}
+                onClick={() => setPage(item.id)}
+                className={`relative flex items-center gap-2 rounded-md px-3 py-2 text-left transition-colors duration-150 ${
+                  active ? "bg-white/[0.08] text-white" : "text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
+                }`}
+              >
+                {active && (
+                  <span className="absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-fluent-accent" />
+                )}
+                <Icon size={15} strokeWidth={1.5} />
+                {item.label}
+              </button>
+            );
+          })}
+        </nav>
 
-        <div className="flex gap-2">
-          <Button
-            variant="secondary"
-            disabled={busy}
-            onClick={browse}
-            className="w-28 border-white/[0.08] bg-white/[0.05] text-zinc-100 transition-all duration-150 hover:bg-white/[0.09]"
-          >
-            Browse
-          </Button>
-          <Button
-            disabled={busy}
-            onClick={convert}
-            className="w-28 bg-indigo-600 font-semibold text-white transition-all duration-150 hover:bg-indigo-500 disabled:opacity-50"
-          >
-            {converting ? "Converting..." : "Convert"}
-          </Button>
-          <Button
-            disabled={!lastOutput}
-            onClick={preview}
-            className="w-28 border-emerald-500/20 bg-emerald-500/10 font-semibold text-emerald-300 transition-all duration-150 hover:bg-emerald-500/20"
-          >
-            Preview
-          </Button>
-        </div>
-
-        <div className="space-y-2 rounded-xl border border-white/[0.08] bg-white/[0.03] p-4">
-          <label className="flex items-center gap-2">
-            <Checkbox id="arcs" checked={useArc} onCheckedChange={(c) => setUseArc(c === true)} />
-            <Label htmlFor="arcs" className="cursor-pointer font-normal">
-              Use G2/G3 arc commands&nbsp;&nbsp;(smaller file, requires arc-capable controller)
-            </Label>
-          </label>
-          <label className="flex items-center gap-2">
-            <Checkbox id="corners" checked={corner} onCheckedChange={(c) => setCorner(c === true)} />
-            <Label htmlFor="corners" className="cursor-pointer font-normal">
-              Corner Feed Reduction&nbsp;&nbsp;(slower feed around sharp G1 corners)
-            </Label>
-          </label>
-        </div>
-
-        <div>
-          <div className="flex items-center gap-2">
-            {busy && <Loader2 size={14} className="animate-spin text-indigo-400" />}
-            <span className={statusColor}>{status}</span>
-          </div>
-          <Progress
-            value={Math.round(progress * 100)}
-            className="mt-2 [&_[data-slot=progress-track]]:bg-white/[0.06]"
-          />
-        </div>
-
-        <div className="flex min-h-0 flex-1 flex-col">
-          <Label className="mb-1 text-[11px] tracking-widest text-zinc-500">CONVERSION LOG</Label>
-          <div
-            ref={logBox}
-            className={`min-h-0 flex-1 overflow-y-auto rounded-xl border p-3 font-mono text-[11.5px] leading-5 ${
-              dropping ? "border-indigo-400/60 bg-indigo-500/10" : "border-white/[0.08] bg-isel-deep/80"
-            }`}
-          >
-            {log.map((line, i) => (
-              <div key={i} className="whitespace-pre-wrap text-isel-log">
-                {line}
+        <main className="flex min-w-0 flex-1 flex-col rounded-tl-lg bg-isel-panel/85 px-5 py-4">
+          <div className="flex items-center justify-between gap-3">
+            <h1 className="text-[20px] font-semibold text-white">{NAV.find((n) => n.id === page)?.label}</h1>
+            {page === "converter" && (
+              <div className="flex gap-2">
+                <Button variant="secondary" disabled={busy} onClick={browse} className="w-28">
+                  Browse
+                </Button>
+                <Button disabled={busy} onClick={convert} className="w-28 font-semibold">
+                  {converting ? "Converting..." : "Convert"}
+                </Button>
+                <Button
+                  variant="secondary"
+                  disabled={!lastOutput}
+                  onClick={preview}
+                  className="w-28 font-semibold text-[#6ccb5f] hover:bg-[rgba(108,203,95,0.16)]"
+                >
+                  Preview
+                </Button>
               </div>
-            ))}
+            )}
           </div>
-        </div>
+
+          {page === "about" ? (
+            <section className="fluent-card select-text mt-4">
+              <div>ISEL &rarr; G-code Converter v{version}</div>
+              <div className="mt-2 text-zinc-400">Converts ISEL/CAM heater-winding programs to machine G-code.</div>
+              <div className="mt-2 font-mono text-[12px] text-zinc-300">
+                CLI: ISEL_to_Gcode.exe convert in.isel out.ngc [--arcs] [--corners]
+              </div>
+            </section>
+          ) : (
+            <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pt-4">
+              <section className="fluent-card shrink-0">
+                <Label className="text-[11px] tracking-widest text-zinc-500">ISEL FILE</Label>
+                <Input
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  spellCheck={false}
+                  className="mt-1 bg-[#1f1f1f] font-mono text-[12px] text-zinc-100 placeholder:text-zinc-600"
+                  placeholder="Drop an ISEL file here or click Browse"
+                />
+              </section>
+
+              <div className="flex shrink-0 gap-3">
+                <section className="fluent-card flex-1 space-y-2">
+                  <label className="flex items-center gap-2">
+                    <Checkbox id="arcs" checked={useArc} onCheckedChange={(c) => setUseArc(c === true)} />
+                    <Label htmlFor="arcs" className="cursor-pointer font-normal">
+                      Use G2/G3 arc commands&nbsp;&nbsp;(smaller file, requires arc-capable controller)
+                    </Label>
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <Checkbox id="corners" checked={corner} onCheckedChange={(c) => setCorner(c === true)} />
+                    <Label htmlFor="corners" className="cursor-pointer font-normal">
+                      Corner Feed Reduction&nbsp;&nbsp;(slower feed around sharp G1 corners)
+                    </Label>
+                  </label>
+                </section>
+
+                <section className="fluent-card flex-1">
+                  <div className="flex items-center gap-2">
+                    {busy && <Loader2 size={14} className="animate-spin text-fluent-accent" />}
+                    <span className={statusColor}>{status}</span>
+                  </div>
+                  <Progress
+                    value={Math.round(progress * 100)}
+                    className="mt-2 [&_[data-slot=progress-track]]:bg-white/[0.06]"
+                  />
+                </section>
+              </div>
+
+              <section className="fluent-card flex min-h-0 flex-1 flex-col">
+                <Label className="mb-1 text-[11px] tracking-widest text-zinc-500">CONVERSION LOG</Label>
+                <div
+                  ref={logBox}
+                  className={`select-text min-h-0 flex-1 overflow-y-auto rounded-lg border p-2 font-mono text-[11.5px] leading-5 ${
+                    dropping ? "border-fluent-accent/60 bg-fluent-accent/10" : "border-white/[0.08] bg-isel-deep/80"
+                  }`}
+                >
+                  {log.map((line, i) => (
+                    <div key={i} className="whitespace-pre-wrap text-isel-log">
+                      {line}
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </div>
+          )}
+        </main>
       </div>
 
       <Separator className="bg-white/[0.08]" />
@@ -319,15 +369,13 @@ export default function App() {
       </footer>
 
       <Dialog open={msg !== null} onOpenChange={(o) => !o && setMsg(null)}>
-        <DialogContent className="border-white/[0.08] bg-isel-dialog text-zinc-100 backdrop-blur-xl">
+        <DialogContent className="border-white/[0.14] bg-isel-dialog text-zinc-100 backdrop-blur-xl">
           <DialogHeader>
             <DialogTitle>{msg?.title}</DialogTitle>
           </DialogHeader>
-          <div className="whitespace-pre-wrap text-[13px] text-zinc-300">{msg?.body}</div>
+          <div className="select-text whitespace-pre-wrap text-[13px] text-zinc-300">{msg?.body}</div>
           <DialogFooter>
-            <Button onClick={() => setMsg(null)} className="bg-indigo-600 text-white hover:bg-indigo-500">
-              OK
-            </Button>
+            <Button onClick={() => setMsg(null)}>OK</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
