@@ -2,7 +2,7 @@
 
 Windows GUI application that converts ISEL CAM files into standard G-code (NC) programs for CNC machines.
 
-![version](https://img.shields.io/badge/version-2.2.1-blue)
+![version](https://img.shields.io/badge/version-2.3.0-blue)
 ![rust](https://img.shields.io/badge/rust-stable-orange)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey)
 
@@ -15,6 +15,7 @@ Windows GUI application that converts ISEL CAM files into standard G-code (NC) p
   - `G1 linearised` — arcs expanded into short line segments
   - `G2/G3 arc commands` — true arc output with full-circle detection (R format, split into two semicircles for controller compatibility)
 - **Spindle handling** — `S... M03` from `SPINDLE CW`, with `M05`/`M30` program end
+- **Optional corner feed reduction** (off by default) — analyses the whole XY toolpath and lowers the feed around genuine sharp corners, then restores it. Only the `F` word of existing movements changes: coordinates, movement count, line numbers and the machined path stay exactly the same
 - **Toolpath preview** — top-down and isometric views with grid, pan, and zoom
 - **Estimated cycle time** shown after conversion
 - Single-file `.exe` — no installation required
@@ -25,8 +26,9 @@ Windows GUI application that converts ISEL CAM files into standard G-code (NC) p
 2. Run the executable.
 3. Drag & drop your ISEL file (`.isel`) or ISELCAM export (`.ncp`) onto the window (or click **Browse**, or drop the file onto the `ISEL_to_Gcode.exe` icon).
 4. Optionally enable **Use G2/G3 arc commands** if your controller supports arcs.
-5. Click **Convert** and choose a save location (`.ngc`).
-6. Open **Preview** to inspect the toolpath before running the program.
+5. Optionally enable **Corner Feed Reduction** to slow the machine down around sharp corners. Leave it off if your parts are mostly short zig-zag passes — every turn is a corner there, so the program takes noticeably longer.
+6. Click **Convert** and choose a save location (`.ngc`).
+7. Open **Preview** to inspect the toolpath before running the program.
 
 > ⚠ The estimated program time is an approximation and may differ from actual machine time depending on machine parameters.
 
@@ -62,9 +64,12 @@ cargo build --release
 ```
 
 The executable is created in `rust/target/release/`. The same executable also runs
-without the window for scripting: `ISEL_to_Gcode.exe convert in.isel out.ngc [--arcs]`.
+without the window for scripting: `ISEL_to_Gcode.exe convert in.isel out.ngc [--arcs] [--corners]`
+(flags come after the two paths; `--corners` enables corner feed reduction).
 
 `cargo test` compares the output byte-for-byte with reference conversions,
-including two real customer programs in `tests/fixtures`.
+including two real customer programs in `tests/fixtures`, and checks that corner
+feed reduction never changes a coordinate, a movement or a line number — only
+the `F` values.
 
 A release build is also triggered automatically by GitHub Actions when a new release is published.
