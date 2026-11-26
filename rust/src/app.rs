@@ -26,6 +26,16 @@ enum Msg {
     Failed(String),
 }
 
+/// A shell dialog running on its own thread. `rfd`'s Windows backend runs the
+/// modal IFileDialog on the calling thread, so calling it from the UI pass froze
+/// the whole window — for as long as the shell needed to resolve the pick (a
+/// network share takes seconds) and marked it "Not responding".
+#[derive(Clone, Copy, PartialEq)]
+enum Pending {
+    Pick,
+    Save,
+}
+
 // The status line doubles as the state light: mint on success, alarm on failure.
 fn status_color(s: &str) -> Color32 {
     if s == "Error occurred" {
@@ -49,6 +59,8 @@ pub struct App {
     rx: Option<Receiver<Msg>>,
     preview: Option<Preview>,
     dialog: Option<(String, String)>,
+    /// File dialog in flight (see `Pending`); polled in `drain_pending`.
+    pending: Option<(Pending, Receiver<Option<PathBuf>>)>,
     // startup diagnostics: how many logic passes ran / did ui ever paint
     probe: u8,
     ui_probe: u8,
@@ -76,6 +88,7 @@ impl Default for App {
             rx: None,
             preview: None,
             dialog: None,
+            pending: None,
             probe: 0,
             ui_probe: 0,
         }
@@ -87,6 +100,53 @@ impl App {
         self.log.push(m.into());
     }
 
+    fn busy(&self) -> bool {
+        self.converting || self.pending.is_some()
+    }
+
+    /// Open a shell dialog on a worker thread and remember it; `drain_pending`
+    /// picks the answer up on the UI thread. Never call a blocking dialog here.
+    fn spawn_dialog(&mut self, kind: Pending) {
+        let base = std::path::Path::new(&self.input)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let picked = match kind {
+                Pending::Pick => rfd::FileDialog::new().pick_file(),
+                Pending::Save => rfd::FileDialog::new()
+                    .set_file_name(format!("{}.ngc", base))
+                    .add_filter("G-code Files", &["ngc"])
+                    .add_filter("All Files", &["*"])
+                    .save_file(),
+            };
+            let _ = tx.send(picked);
+        });
+        self.pending = Some((kind, rx));
+        self.status = "Waiting for the file dialog...".to_string();
+    }
+
+    fn drain_pending(&mut self) {
+        let Some((kind, rx)) = &self.pending else { return };
+        let Ok(picked) = rx.try_recv() else { return };
+        let kind = *kind;
+        self.pending = None;
+        self.status = "Ready".to_string();
+        match (kind, picked) {
+            (Pending::Pick, Some(p)) => {
+                self.input = p.to_string_lossy().into_owned();
+                self.push_log(format!("File selected: {}", self.input));
+            }
+            (Pending::Save, Some(p)) => {
+                self.begin_convert(p.to_string_lossy().into_owned());
+            }
+            // cancelled: nothing was started, so there is nothing to undo
+            (Pending::Pick, None) | (Pending::Save, None) => {}
+        }
+    }
+
+    /// CONVERT: validate the input, then ask where to save — asynchronously.
     fn start_convert(&mut self) {
         let in_path = self.input.clone();
         if in_path.is_empty() {
@@ -97,20 +157,11 @@ impl App {
             self.dialog = Some(("Error".into(), format!("File not found: {}", in_path)));
             return;
         }
-        let base = std::path::Path::new(&in_path)
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let Some(out) = rfd::FileDialog::new()
-            .set_file_name(format!("{}.ngc", base))
-            .add_filter("G-code Files", &["ngc"])
-            .add_filter("All Files", &["*"])
-            .save_file()
-        else {
-            return;
-        };
-        let out_path = out.to_string_lossy().into_owned();
+        self.spawn_dialog(Pending::Save);
+    }
 
+    fn begin_convert(&mut self, out_path: String) {
+        let in_path = self.input.clone();
         let arc = self.use_arc;
         let corner = self.corner;
         self.converting = true;
@@ -240,6 +291,7 @@ impl App {
 impl eframe::App for App {
     // eframe 0.37 split the old `update` into `logic` (no painting) + `ui`.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.drain_pending();
         self.drain();
         shot_hook(ctx);
 
@@ -307,23 +359,21 @@ impl eframe::App for App {
                 );
 
                 ui.add_space(8.0);
+                let busy = self.busy();
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(
-                            !self.converting,
+                            !busy,
                             egui::Button::new("BROWSE").fill(BTN).min_size(egui::vec2(110.0, 28.0)),
                         )
                         .clicked()
                     {
-                        if let Some(p) = rfd::FileDialog::new().pick_file() {
-                            self.input = p.to_string_lossy().into_owned();
-                            self.push_log(format!("File selected: {}", self.input));
-                        }
+                        self.spawn_dialog(Pending::Pick);
                     }
                     let convert_label = if self.converting { "CONVERTING..." } else { "CONVERT" };
                     if ui
                         .add_enabled(
-                            !self.converting,
+                            !busy,
                             egui::Button::new(
                                 RichText::new(convert_label).strong().color(
                                     // cyan fill wants dark glyphs, the dim mid-conversion fill wants light
@@ -361,7 +411,14 @@ impl eframe::App for App {
                 );
 
                 ui.add_space(6.0);
-                ui.label(RichText::new(self.status.clone()).color(status_color(&self.status)));
+                ui.horizontal(|ui| {
+                    // a dialog or a conversion is in flight: show it, so a slow
+                    // shell (network share) never looks like a hung window
+                    if busy {
+                        ui.spinner();
+                    }
+                    ui.label(RichText::new(self.status.clone()).color(status_color(&self.status)));
+                });
                 ui.add(
                     egui::ProgressBar::new(self.progress)
                         .desired_width(f32::INFINITY)
@@ -412,7 +469,7 @@ impl eframe::App for App {
             }
         }
 
-        if self.converting {
+        if self.busy() {
             ctx.request_repaint_after(Duration::from_millis(80));
         }
     }
@@ -674,6 +731,46 @@ mod tests {
         app.open_preview();
         assert!(app.preview.is_none());
         assert!(app.dialog.is_none(), "missing output is a silent no-op");
+    }
+
+    #[test]
+    fn opening_a_dialog_does_not_block_the_caller() {
+        // The freeze this guards: rfd runs the modal IFileDialog on the calling
+        // thread, so a slow shell (network share) froze the window. The dialog is
+        // now on a worker thread, so asking for one returns at once. The dialog
+        // itself is left to the OS here — its result is tested above by channel.
+        let mut app = App::default();
+        let t = std::time::Instant::now();
+        app.spawn_dialog(Pending::Pick);
+        assert!(t.elapsed() < std::time::Duration::from_millis(500), "{:?}", t.elapsed());
+        assert!(app.busy());
+        assert_eq!(app.status, "Waiting for the file dialog...");
+    }
+
+    #[test]
+    fn picked_file_lands_in_the_input_field() {
+        let mut app = App::default();
+        let (tx, rx) = channel();
+        app.pending = Some((Pending::Pick, rx));
+        tx.send(Some(PathBuf::from("C:/parts/job1.isel"))).unwrap();
+        app.drain_pending();
+        assert!(!app.busy());
+        assert_eq!(app.input, "C:/parts/job1.isel");
+        assert!(app.log.iter().any(|l| l.contains("File selected: C:/parts/job1.isel")));
+    }
+
+    #[test]
+    fn cancelled_pick_changes_nothing() {
+        let mut app = App::default();
+        let (tx, rx) = channel();
+        app.input = "C:/keep/this.isel".into();
+        app.pending = Some((Pending::Pick, rx));
+        assert!(app.busy(), "the in-flight dialog locks the buttons");
+        tx.send(None).unwrap();
+        app.drain_pending();
+        assert!(!app.busy());
+        assert_eq!(app.input, "C:/keep/this.isel");
+        assert_eq!(app.status, "Ready");
     }
 
     #[test]
