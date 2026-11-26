@@ -1,0 +1,47 @@
+name: CodeQL (Rust)
+
+# Code scanning default setup cannot select Rust (its language enum lacks
+# `rust` — measured 2026-11-26: 422 "rust is not a possible value"), so the
+# Rust half of the codebase is scanned by this manual workflow. It coexists
+# with default setup, which keeps analyzing actions + JS/TS.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  security-events: write
+  actions: read
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - run: rustup toolchain install stable-x86_64-pc-windows-gnu --no-self-update --profile minimal
+      - run: echo "C:\\mingw64\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # dist/ must exist: the tauri build script embeds it and fails the
+      # traced build without it (same order as CI's build job)
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: rust
+
+      - name: traced build
+        run: cargo build
+        working-directory: src-tauri
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:rust"
