@@ -72,4 +72,7 @@ including two real customer programs in `tests/fixtures`, and checks that corner
 feed reduction never changes a coordinate, a movement or a line number — only
 the `F` values.
 
-A release build is also triggered automatically by GitHub Actions when a new release is published.
+Pushing to `main` publishes a release automatically: the `Release` workflow reads the
+version from `rust/Cargo.toml`, runs the tests, builds and attaches the exe. If that
+version is already released it does nothing, so a push that does not bump the version
+publishes nothing.

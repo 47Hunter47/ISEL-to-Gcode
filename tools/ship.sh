@@ -71,4 +71,5 @@ else
 fi
 
 git push origin HEAD
-echo "pushed. to publish: git tag -a v$(sed -n 's/^version = "\(.*\)"$/\1/p' rust/Cargo.toml | head -1) && git push origin --tags && gh release create <tag>"
+v=$(sed -n 's/^version = "\(.*\)"$/\1/p' rust/Cargo.toml | head -1)
+echo "pushed. the Release workflow publishes v$v and attaches the exe automatically"

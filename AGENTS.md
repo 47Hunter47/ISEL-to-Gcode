@@ -30,9 +30,11 @@ written in English.
   the same commit and pushes. A plain `git push` does not bump, and a pre-push hook cannot
   do it: git resolves the refs before the hook runs, so a commit made inside the hook is
   never pushed.
-- Release: `version` in `rust/Cargo.toml` is the single source of truth; `git tag -a
-  vX.Y.Z`, push the tag, `gh release create vX.Y.Z`. Only a *published* release triggers
-  the CI build and attaches `ISEL_to_Gcode.exe`.
+- Release: pushing to `main` publishes it. The `Release` workflow derives the tag from
+  `version` in `rust/Cargo.toml` (never typed, so it cannot drift), runs the tests, builds
+  and creates the release with the exe at the pushed commit. If that version is already
+  released the job stops before building, so a push without a bump publishes nothing.
+  Publishing a release by hand still works: it only attaches the exe to it.
 
 ## Do
 - Keep the output byte-for-byte identical to `tests/fixtures/*expected*`.
