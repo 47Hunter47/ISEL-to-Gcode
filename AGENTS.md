@@ -54,6 +54,10 @@ written in English.
   to `egui::Window` squeezes it inside the main window. Headless evidence:
   `ISEL_PREVIEW=<out.ngc>` opens the preview at startup and a second top-level window
   shows up via `EnumWindows`.
+- Never call a blocking shell dialog (`rfd::FileDialog`) from the UI pass; it runs
+  the modal IFileDialog on the calling thread and freezes the window for as long as
+  the shell needs (seconds on a network share). Spawn it, drain the answer on the UI
+  thread, and show that something is in flight.
 - Keep the `.ngc`/`.isel`/`.ncp` CRLF pins in `.gitattributes`.
 - After a code change refresh both graphs: codegraph `sync` and `graphify update .`.
 
