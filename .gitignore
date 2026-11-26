@@ -4,8 +4,9 @@ graph_update.log
 __pycache__/
 *.pyc
 dist/
+node_modules/
 build/
 .version
 *.spec
-rust/target/
+src-tauri/target/
 .superpowers/

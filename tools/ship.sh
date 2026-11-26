@@ -26,13 +26,13 @@ if [ -n "$(git status --porcelain)" ]; then
   git commit -q -m "$msg"
 fi
 
-anchor=$(git log -1 --format=%H -G'^version = ' -- rust/Cargo.toml || true)
+anchor=$(git log -1 --format=%H -G'^version = ' -- src-tauri/Cargo.toml || true)
 range="HEAD"
 [ -n "$anchor" ] && range="$anchor..HEAD"
 subjects=$(git log --format=%s "$range")
 
-cur=$(sed -n 's/^version = "\(.*\)"$/\1/p' rust/Cargo.toml | head -1)
-[ -n "$cur" ] || { echo "error: no version line in rust/Cargo.toml" >&2; exit 1; }
+cur=$(sed -n 's/^version = "\(.*\)"$/\1/p' src-tauri/Cargo.toml | head -1)
+[ -n "$cur" ] || { echo "error: no version line in src-tauri/Cargo.toml" >&2; exit 1; }
 
 bump=""
 if grep -qE '^feat' <<<"$subjects"; then
@@ -53,17 +53,17 @@ else
   new="$major.$minor.$patch"
   echo "version $cur -> $new ($bump)"
 
-  sed -i "s/^version = \"$cur\"$/version = \"$new\"/" rust/Cargo.toml
+  sed -i "s/^version = \"$cur\"$/version = \"$new\"/" src-tauri/Cargo.toml
   # Cargo.lock keeps the package's own version too; `cargo metadata` would fix it
   # but it silently accepts a broken lock, so patch the one block and verify that.
   awk -v v="$new" '
     /^name = "isel-to-gcode"$/ { hit = 1 }
     hit && /^version = / { sub(/".*"/, "\"" v "\""); hit = 0 }
     { print }
-  ' rust/Cargo.lock > rust/Cargo.lock.tmp
-  mv rust/Cargo.lock.tmp rust/Cargo.lock
-  grep -A1 '^name = "isel-to-gcode"$' rust/Cargo.lock | grep -q "\"$new\"" ||
-    { echo "error: rust/Cargo.lock was not updated" >&2; exit 1; }
+  ' src-tauri/Cargo.lock > src-tauri/Cargo.lock.tmp
+  mv src-tauri/Cargo.lock.tmp src-tauri/Cargo.lock
+  grep -A1 '^name = "isel-to-gcode"$' src-tauri/Cargo.lock | grep -q "\"$new\"" ||
+    { echo "error: src-tauri/Cargo.lock was not updated" >&2; exit 1; }
   sed -i "s|badge/version-[0-9.]*-blue|badge/version-$new-blue|" README.md
 
   git add -A
@@ -71,5 +71,5 @@ else
 fi
 
 git push origin HEAD
-v=$(sed -n 's/^version = "\(.*\)"$/\1/p' rust/Cargo.toml | head -1)
+v=$(sed -n 's/^version = "\(.*\)"$/\1/p' src-tauri/Cargo.toml | head -1)
 echo "pushed. the Release workflow publishes v$v and attaches the exe automatically"

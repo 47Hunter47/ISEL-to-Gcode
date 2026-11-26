@@ -11,7 +11,7 @@ jobs:
     runs-on: windows-latest
     defaults:
       run:
-        working-directory: rust
+        working-directory: src-tauri
     steps:
       - uses: actions/checkout@v5
 
@@ -30,7 +30,7 @@ jobs:
     runs-on: windows-latest
     defaults:
       run:
-        working-directory: rust
+        working-directory: src-tauri
     steps:
       - uses: actions/checkout@v5
       - run: rustup toolchain install stable-x86_64-pc-windows-gnu --no-self-update --profile minimal
@@ -42,5 +42,5 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: ISEL_to_Gcode_v${{ steps.ver.outputs.version }}
-          path: rust/target/release/ISEL_to_Gcode.exe
+          path: src-tauri/target/release/ISEL_to_Gcode.exe
           retention-days: 7

@@ -21,7 +21,7 @@ jobs:
     runs-on: windows-latest
     defaults:
       run:
-        working-directory: rust
+        working-directory: src-tauri
     steps:
       - uses: actions/checkout@v5
 
@@ -89,7 +89,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: ISEL_to_Gcode_v${{ steps.ver.outputs.version }}
-          path: rust/target/release/ISEL_to_Gcode.exe
+          path: src-tauri/target/release/ISEL_to_Gcode.exe
           retention-days: 7
 
       # The tag is created here, at the commit that was built, so a release can

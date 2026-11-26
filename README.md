@@ -54,16 +54,16 @@ The first spindle command is emitted **after** the first Z safe retract, so the 
 
 ## Building from source
 
-Requires Rust (the `rust/rust-toolchain.toml` file pins the toolchain) and, on
+Requires Rust (the `src-tauri/rust-toolchain.toml` file pins the toolchain) and, on
 Windows, the GNU binutils that toolchain needs for linking (MSYS2/WinLibs or
 `winget install BrechtSanders.WinLibs.POSIX.UCRT`).
 
 ```bat
-cd rust
+cd src-tauri
 cargo build --release
 ```
 
-The executable is created in `rust/target/release/`. The same executable also runs
+The executable is created in `src-tauri/target/release/`. The same executable also runs
 without the window for scripting: `ISEL_to_Gcode.exe convert in.isel out.ngc [--arcs] [--corners]`
 (flags come after the two paths; `--corners` enables corner feed reduction).
 
@@ -73,6 +73,6 @@ feed reduction never changes a coordinate, a movement or a line number — only
 the `F` values.
 
 Pushing to `main` publishes a release automatically: the `Release` workflow reads the
-version from `rust/Cargo.toml`, runs the tests, builds and attaches the exe. If that
+version from `src-tauri/Cargo.toml`, runs the tests, builds and attaches the exe. If that
 version is already released it does nothing, so a push that does not bump the version
 publishes nothing.
