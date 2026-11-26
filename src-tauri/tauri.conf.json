@@ -27,6 +27,8 @@
   },
   "bundle": {
     "active": false,
+    "publisher": "ISIN Heaters Ltd.",
+    "copyright": "© ISIN Heaters Ltd. All rights reserved.",
     "icon": ["assets/icon.ico"]
   }
 }

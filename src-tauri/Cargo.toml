@@ -11,6 +11,12 @@ path = "src/lib.rs"
 name = "ISEL_to_Gcode"
 path = "src/main.rs"
 
+# Explorer > Properties > Details: tauri-build fills CompanyName/LegalCopyright
+# from bundle.* in tauri.conf.json; OriginalFilename is not covered there, the
+# tauri-winres metadata section below is its only knob.
+[package.metadata.tauri-winres]
+OriginalFilename = "ISEL_to_Gcode.exe"
+
 [build-dependencies]
 # tauri-build embeds the Win32 resource (icon + version) that the old build.rs
 # did by hand with windres; the icon comes from tauri.conf.json bundle.icon.
