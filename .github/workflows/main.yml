@@ -66,6 +66,8 @@ jobs:
           } else {
             "skip=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           }
+          # a missing release leaves $LASTEXITCODE=1, which would fail the step
+          exit 0
 
       # rust-toolchain.toml pins a fully-qualified channel; rustup only accepts
       # that when the toolchain already exists, so install it explicitly.
