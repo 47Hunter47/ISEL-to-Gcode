@@ -293,6 +293,7 @@ export default function App() {
           {page === "about" ? (
             <section className="fluent-card select-text mt-4">
               <div>ISEL &rarr; G-code Converter v{version}</div>
+              <div className="mt-2">Developed by ISIN Heaters Ltd.</div>
               <div className="mt-2 text-zinc-400">Converts ISEL/CAM heater-winding programs to machine G-code.</div>
               <div className="mt-2 font-mono text-[12px] text-zinc-300">
                 CLI: ISEL_to_Gcode.exe convert in.isel out.ngc [--arcs] [--corners]
@@ -313,17 +314,31 @@ export default function App() {
 
               <div className="flex shrink-0 gap-3">
                 <section className="fluent-card flex-1 space-y-2">
-                  <label className="flex items-center gap-2">
+                  {/* fluent selectable rows: checked = accent pill/tint so the
+                      toggle state reads at a glance, not just the 16px box */}
+                  <label
+                    className={`flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 transition-colors duration-150 ${
+                      useArc
+                        ? "border-fluent-accent/60 bg-fluent-accent/10 text-white"
+                        : "border-white/[0.07] hover:bg-white/[0.04]"
+                    }`}
+                  >
                     <Checkbox id="arcs" checked={useArc} onCheckedChange={(c) => setUseArc(c === true)} />
-                    <Label htmlFor="arcs" className="cursor-pointer font-normal">
+                    <span className="font-normal">
                       Use G2/G3 arc commands&nbsp;&nbsp;(smaller file, requires arc-capable controller)
-                    </Label>
+                    </span>
                   </label>
-                  <label className="flex items-center gap-2">
+                  <label
+                    className={`flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 transition-colors duration-150 ${
+                      corner
+                        ? "border-fluent-accent/60 bg-fluent-accent/10 text-white"
+                        : "border-white/[0.07] hover:bg-white/[0.04]"
+                    }`}
+                  >
                     <Checkbox id="corners" checked={corner} onCheckedChange={(c) => setCorner(c === true)} />
-                    <Label htmlFor="corners" className="cursor-pointer font-normal">
+                    <span className="font-normal">
                       Corner Feed Reduction&nbsp;&nbsp;(slower feed around sharp G1 corners)
-                    </Label>
+                    </span>
                   </label>
                 </section>
 
@@ -343,7 +358,7 @@ export default function App() {
                 <Label className="mb-1 text-[11px] tracking-widest text-zinc-500">CONVERSION LOG</Label>
                 <div
                   ref={logBox}
-                  className={`select-text min-h-0 flex-1 overflow-y-auto rounded-lg border p-2 font-mono text-[11.5px] leading-5 ${
+                  className={`select-text min-h-0 flex-1 overflow-y-auto rounded-lg border p-2 text-[11.5px] leading-5 ${
                     dropping ? "border-fluent-accent/60 bg-fluent-accent/10" : "border-white/[0.08] bg-isel-deep/80"
                   }`}
                 >
