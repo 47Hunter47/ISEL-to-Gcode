@@ -72,10 +72,12 @@ pub fn arc_to_polyline(x0: f64, y0: f64, x1: f64, y1: f64, r_signed: f64, is_g2:
     let cx2 = mx - h * px; let cy2 = my - h * py;
 
     let c1_cross = dx * (cy1 - y0) - dy * (cx1 - x0);
+    // R > 0 selects the minor (<= 180 degree) arc. For CW motion the
+    // center is on the right of travel; for CCW it is on the left.
     let (mut cx, mut cy) = if is_g2 {
-        if c1_cross > 0.0 { (cx1, cy1) } else { (cx2, cy2) }
+        if c1_cross > 0.0 { (cx2, cy2) } else { (cx1, cy1) }
     } else {
-        if c1_cross < 0.0 { (cx1, cy1) } else { (cx2, cy2) }
+        if c1_cross < 0.0 { (cx2, cy2) } else { (cx1, cy1) }
     };
     if r_signed < 0.0 {
         // major arc: take the OTHER center (python lines 196-198, float equality intended)
