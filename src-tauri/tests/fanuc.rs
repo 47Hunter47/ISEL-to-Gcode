@@ -88,6 +88,8 @@ fn must_err(src: &str, needle: &str) {
     must_err("G65 P1 L2", "not supported");
     must_err("X5. Y5.", "coordinates before any motion");
     must_err("G01 X1. F100.\nG02 X5. Y5. I2.", "partial I/J");
+    // Full-circle blocks have no endpoint, but I/J must still be a complete pair.
+    must_err("G01 X10. Y0. F100.\nG02 I-5.", "partial I/J");
     must_err("G01 X1. F100.\nG18 G02 X5. Y5. I2. J2.", "interpolation plane");
     must_err("G92 X10.", "G92");
     must_err("G95 G01 X1. F2.", "per revolution");
