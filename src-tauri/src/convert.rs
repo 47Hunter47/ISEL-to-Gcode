@@ -502,6 +502,16 @@ pub fn convert_file(
     // python reads with errors="replace"; lossy bytes cannot form an ASCII
     // command token, so parse behaviour is identical.
     let text = String::from_utf8_lossy(&bytes).into_owned();
+    // Fanuc-dialect input (e.g. a SolidWorks CAM export): rewritten into ISEL
+    // commands here so the loop below never sees a G-code line. ISEL input
+    // (any file with an engine command word) is untouched.
+    let text = if crate::fanuc::looks_like_fanuc(&text) {
+        let rewritten = crate::fanuc::rewrite_to_isel(&text)?;
+        log("Fanuc-format input: rewritten to ISEL commands");
+        rewritten
+    } else {
+        text
+    };
     let total_lines = text
         .lines()
         .filter(|l| {

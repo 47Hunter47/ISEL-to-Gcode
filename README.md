@@ -1,6 +1,7 @@
 # ISEL to G-code Converter
 
-Windows GUI application that converts ISEL CAM files into standard G-code (NC) programs for CNC machines.
+Windows GUI application that converts ISEL CAM files and Fanuc-style G-code (for example
+SolidWorks CAM post output) into standard G-code (NC) programs for CNC machines.
 
 ![version](https://img.shields.io/badge/version-2.6.2-blue)
 ![rust](https://img.shields.io/badge/rust-stable-orange)
@@ -16,6 +17,11 @@ Windows GUI application that converts ISEL CAM files into standard G-code (NC) p
   - `G2/G3 arc commands` — true arc output with full-circle detection (R format, split into two semicircles for controller compatibility)
 - **Spindle handling** — `S... M03` from `SPINDLE CW`, with `M05`/`M30` program end
 - **Optional corner feed reduction** (off by default) — analyses the whole XY toolpath and lowers the feed around genuine sharp corners, then restores it. Curved sections are recognised as curves, not as a chain of corners, so each arc runs at one steady reduced feed and the straights keep full speed. Only the `F` word of existing movements changes: coordinates, movement count, line numbers and the machined path stay exactly the same
+- **Fanuc-format input** — a `.nc` file printed by a Fanuc post processor (SolidWorks CAM and
+  similar) is recognized automatically and converted like an ISEL program; the file format
+  needs no setting. The export must be absolute, mm programming: inch (G20), canned drilling
+  cycles, cutter compensation (G41/G42), spindle CCW and inch/incremental options stop the
+  conversion with an error that names the line and what to turn off in the post
 - **Toolpath preview** — top-down and isometric views with grid, pan, and zoom
 - **Estimated cycle time** shown after conversion
 - Single-file `.exe` — no installation required; renders with the Edge WebView2
@@ -23,9 +29,12 @@ Windows GUI application that converts ISEL CAM files into standard G-code (NC) p
 
 ## Usage
 
-1. Download the latest release (`ISEL_to_Gcode.exe`) from the [Releases](https://github.com/47Hunter47/ISEL-to-Gcode/releases) page.
+1. Download the latest release (`ISEL_to_Gcode.exe`) from the [Releases](https://github.com/47Hunter47/ISEL-to-Gcode-Converter/releases) page.
 2. Run the executable.
-3. Drag & drop your ISEL file (`.isel`) or ISELCAM export (`.ncp`) onto the window (or click **Browse**, or drop the file onto the `ISEL_to_Gcode.exe` icon).
+3. Drag & drop your ISEL file (`.isel`) or ISELCAM export (`.ncp`) onto the window, or a
+   Fanuc-format `.nc` file from SolidWorks CAM or another post processor (or click **Browse**,
+   or drop the file onto the `ISEL_to_Gcode.exe` icon). The format is detected from the file
+   itself.
 4. Optionally enable **Use G2/G3 arc commands** if your controller supports arcs.
 5. Optionally enable **Corner Feed Reduction** to slow the machine down around sharp corners. Leave it off if your parts are mostly short zig-zag passes — every turn is a corner there, so the program takes noticeably longer.
 6. Click **Convert** and choose a save location (`.ngc`).
