@@ -1,4 +1,4 @@
-use isel_to_gcode::convert::{convert_file, fit_circle, parse_coord, try_arc_fit};
+use isel_to_gcode::convert::{convert_file, fit_circle, parse_coord, try_arc_fit, RAPID_FEED};
 
 // ── parse_coord ─────────────────────────────────────────────────────────────
 #[test] fn fast_int() { assert_eq!(parse_coord("MOVEABS X328495 Z-103460", &['X','Y','Z'])[&'X'], 328.495); }
@@ -200,6 +200,7 @@ fn direct_full_circle_arc_is_emitted_as_two_semicircles() {
     assert_eq!(arcs.len(), 2, "full circle must be two controller-safe arcs: {ngc}");
     assert!(arcs[0].contains("G2 X32.000 Y20.000 R6.000"), "{ngc}");
     assert!(arcs[1].contains("G2 X20.000 Y20.000 R6.000"), "{ngc}");
-    let expected = 2.0 * std::f64::consts::PI * 6.0 / (16667.0 / 16.6667);
-    assert!((time - expected).abs() < 1e-9, "cycle time {time}, expected {expected}");
+    let expected = (20.0f64 * 20.0 + 20.0 * 20.0 + 1.0).sqrt() / RAPID_FEED
+        + 2.0 * std::f64::consts::PI * 6.0 / (16667.0 / 16.6667);
+    assert!((time - expected).abs() < 1e-6, "cycle time {time}, expected {expected}");
 }
