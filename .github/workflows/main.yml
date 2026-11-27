@@ -23,7 +23,7 @@ jobs:
       run:
         working-directory: src-tauri
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # rust-toolchain.toml pins a fully-qualified channel; rustup only accepts
       # that when the toolchain already exists, so install it explicitly.
