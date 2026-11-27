@@ -334,7 +334,7 @@ export default function App() {
             <section className="fluent-card select-text mt-4">
               <div>ISEL &rarr; G-code Converter v{version}</div>
               <div className="mt-2">Developed by ISIN Heaters Ltd.</div>
-              <div className="mt-2 text-zinc-400">Converts ISEL/CAM heater-winding programs to machine G-code.</div>
+              <div className="mt-2 text-zinc-400">Converts ISEL/CAM and Fanuc-format programs to G-code for CNC milling machines.</div>
               <div className="mt-2 font-mono text-[12px] text-zinc-300">
                 CLI: ISEL_to_Gcode.exe convert in.isel out.ngc [--arcs] [--corners]
               </div>
