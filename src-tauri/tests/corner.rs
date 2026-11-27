@@ -960,3 +960,22 @@ fn corner_after_a_vel_change_slows_relative_to_the_new_base() {
     assert!(fs.iter().all(|&v| v <= 2000.0 + 0.5), "{on}");
     assert_eq!(on.matches(" F2000").count(), 2, "the VEL line and the restore: {on}");
 }
+
+
+/// A closed circular polyline accumulates a full 360-degree turn. It must not
+/// alias to zero when the curve radius is estimated from endpoint headings.
+#[test]
+fn closed_circle_is_classified_by_its_radius() {
+    let r = 2.0;
+    let n = 240;
+    let pts: Vec<(f64, f64)> = (0..=n)
+        .map(|i| {
+            let a = std::f64::consts::TAU * i as f64 / n as f64;
+            (r * a.cos(), r * a.sin())
+        })
+        .collect();
+    let p = analyze(&prog(&pts));
+    let min_factor = p.factors.values().copied().fold(1.0f64, f64::min);
+    assert!(p.arcs > 0, "closed circle was not classified as a curved section");
+    assert!(min_factor < 0.8, "R=2 mm circle did not receive meaningful reduction: {min_factor}");
+}
