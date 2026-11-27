@@ -3,7 +3,7 @@
 Windows GUI application that converts ISEL CAM files and Fanuc-style G-code (for example
 SolidWorks CAM post output) into standard G-code (NC) programs for CNC machines.
 
-![version](https://img.shields.io/badge/version-2.7.1-blue)
+![version](https://img.shields.io/badge/version-2.7.2-blue)
 ![rust](https://img.shields.io/badge/rust-stable-orange)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey)
 

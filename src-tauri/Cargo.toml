@@ -1,6 +1,6 @@
 [package]
 name = "isel-to-gcode"
-version = "2.7.1"
+version = "2.7.2"
 edition = "2024"
 
 [lib]
