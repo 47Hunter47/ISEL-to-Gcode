@@ -1,8 +1,8 @@
 # AGENTS.md — ISEL-to-Gcode
 
-Converts ISEL/CAM programs into the G-code that ISIN's heater-winding machines read.
+Converts ISEL/CAM programs into the G-code that cnc milling machines read.
 Status, open work, bug history and test results are NOT kept here — they live in the
-Obsidian note `Projeler/ISEL_to_Gcode.md`. This file is the rule book only.
+This file is the rule book only.
 
 The repository is public: documentation, comments, commit messages and release notes are
 written in English.
@@ -96,7 +96,7 @@ written in English.
   buries the real change.
 - Do not use subagents in this project.
 
-## Code graph (graphify) — automatic use
+## Codegraph + graphify — automatic use
 
 - **Before opening project files** take a quick look at the architecture:
   ```bash
