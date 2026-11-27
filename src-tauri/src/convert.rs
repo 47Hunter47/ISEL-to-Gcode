@@ -286,6 +286,18 @@ impl Conv {
     fn arc_to_g2g3(&mut self, start: Pos, end: Pos, center: Pos, cw: bool) -> Vec<String> {
         let (cx, cy) = (center.x, center.y);
         let r = (start.x - cx).hypot(start.y - cy);
+        // R-format G2/G3 cannot represent a full circle (identical start/end).
+        // Split it into two exact semicircles so controllers receive valid arcs.
+        if (end.x - start.x).hypot(end.y - start.y) < 1e-9 && r > 1e-9 {
+            let mid = Pos {
+                x: 2.0 * cx - start.x,
+                y: 2.0 * cy - start.y,
+                z: start.z,
+            };
+            let mut lines = self.arc_to_g2g3(start, mid, center, cw);
+            lines.extend(self.arc_to_g2g3(mid, end, center, cw));
+            return lines;
+        }
         let a0 = (start.y - cy).atan2(start.x - cx);
         let mut a1 = (end.y - cy).atan2(end.x - cx);
         if cw {

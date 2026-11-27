@@ -288,7 +288,9 @@ pub fn rewrite_to_isel(text: &str) -> Result<String, String> {
         }
 
         let moved = gx.is_some() || gy.is_some() || gz.is_some();
-        if moved && gi.is_some() != gj.is_some() {
+        // I/J is a pair even for full circles with no X/Y endpoint. Otherwise an
+        // I-only full-circle block reaches gj.unwrap() below and panics.
+        if gi.is_some() != gj.is_some() {
             return Err(err("partial I/J arc pair".to_string()));
         }
         let arc_words = gi.is_some() || gr.is_some();

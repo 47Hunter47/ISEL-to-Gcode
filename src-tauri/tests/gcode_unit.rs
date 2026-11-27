@@ -15,21 +15,19 @@ fn near(a: (f64, f64), b: (f64, f64), tol: f64) -> bool {
     (a.0 - b.0).abs() < tol && (a.1 - b.1).abs() < tol
 }
 
-// Values below were captured from the python reference `_arc_to_polyline` on
-// 2026-11-12 (see ledger); they pin the port, including the python center-side
-// logic for positive-R G2 that yields a 270° CW sweep.
-#[test] fn arc_positive_r_reference_points() {
+// R > 0 selects the minor (<= 180 degree) arc; R < 0 selects the major.
+#[test] fn arc_positive_r_selects_minor_cw_sweep() {
     let pts = arc_to_polyline(5., 0., 0., 5., 5.0, true);
     assert_eq!(pts.len(), 37);
     assert!(near(pts[0], (5.0, 0.0), 1e-12));
-    assert!(near(pts[18], (-3.535533905932737, -3.5355339059327373), 1e-9));
+    assert!(near(pts[18], (1.4644660940672627, 1.4644660940672622), 1e-9));
     assert!(near(pts[36], (0.0, 5.0), 1e-6));
 }
 
-#[test] fn arc_negative_r_flips_center() {
+#[test] fn arc_negative_r_selects_major_cw_sweep() {
     let pts = arc_to_polyline(5., 0., 0., 5., -5.0, true);
     assert_eq!(pts.len(), 37);
-    assert!(near(pts[18], (1.4644660940672627, 1.4644660940672622), 1e-9));
+    assert!(near(pts[18], (-3.535533905932737, -3.5355339059327373), 1e-9));
 }
 
 #[test] fn arc_degenerate_zero_distance() {

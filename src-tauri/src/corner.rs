@@ -284,9 +284,16 @@ impl Group {
             // window turns would count the same degrees three times over, since
             // those windows overlap.
             let len = p.cum[end] - p.cum[start];
-            let mut total = p.heading(p.cum[end]) - p.heading(p.cum[start]);
-            total = ((total + 180.0).rem_euclid(360.0)) - 180.0;
-            let total = total.abs();
+            // Unwrap successive local headings: a closed circle turns 360 deg,
+            // which endpoint-only normalization aliases to zero.
+            let headings: Vec<f64> = (start..=end)
+                .map(|k| p.heading(p.cum[k]))
+                .collect();
+            let signed_total: f64 = headings
+                .windows(2)
+                .map(|w| ((w[1] - w[0] + 180.0).rem_euclid(360.0)) - 180.0)
+                .sum();
+            let total = signed_total.abs();
             let r = if total > 1e-6 { len / total.to_radians() } else { f64::INFINITY };
             // A curve never runs slower than a sharp corner that turns the same
             // total amount: rounding a corner must not make it slower than the
