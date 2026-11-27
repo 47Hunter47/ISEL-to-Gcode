@@ -260,10 +260,20 @@ export default function App() {
   // current busy/dialog state
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Enter" && !busy && !msg) {
+      // Enter belongs to focused controls, not the global convert shortcut.
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      const editing = !!target?.closest(
+        'input, textarea, select, button, [role="button"], [contenteditable="true"]',
+      );
+      if (e.key === "Enter" && page === "converter" && !editing && !busy && !msg) {
         e.preventDefault();
         void convert();
-      } else if ((e.ctrlKey || e.metaKey) && (e.key === "b" || e.key === "o") && !busy) {
+      } else if (
+        page === "converter" &&
+        (e.ctrlKey || e.metaKey) &&
+        (e.key === "b" || e.key === "o") &&
+        !busy
+      ) {
         e.preventDefault();
         void browse();
       }
