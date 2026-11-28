@@ -103,6 +103,15 @@ pub async fn save_file(default_name: String) -> Option<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
+/// Flush point of the convert worker's log batcher: full buffer -> one joined
+/// event, partial buffer stays pending (the caller flushes it before done).
+fn take_log_batch(buf: &mut Vec<String>) -> Option<String> {
+    if buf.len() < 200 {
+        return None;
+    }
+    Some(std::mem::take(buf).join("\n"))
+}
+
 /// Runs `convert_file` on a blocking task and forwards its log/progress
 /// closures as window events. `convert_file` itself is untouched.
 #[tauri::command]
@@ -119,15 +128,29 @@ pub async fn convert(
     let (a_log, a_prog, a_end) = (app.clone(), app.clone(), app.clone());
     let out_for_cache = output.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // CAM posts print a feed line on almost every block (a real customer
+        // program logged 204k lines): one event per line outruns the webview's
+        // event queue and the window freezes mid-file while the converter is
+        // already done, so lines are forwarded in batches.
+        // shortcut: batch size is a line count, not a flush interval; upgrade
+        // to a timer only if a single batch ever renders too coarse.
+        let mut buf: Vec<String> = vec![];
         let mut log = |m: &str| {
-            let _ = a_log.emit("convert-log", LogMsg { line: m.to_string() });
+            buf.push(m.to_string());
+            if let Some(joined) = take_log_batch(&mut buf) {
+                let _ = a_log.emit("convert-log", LogMsg { line: joined });
+            }
         };
         let mut progress: Option<Box<dyn FnMut(f64, &str)>> = Some(Box::new(
             move |p: f64, t: &str| {
                 let _ = a_prog.emit("convert-progress", ProgressMsg { percent: p, text: t.to_string() });
             },
         ));
-        match convert_file(&input, &output, arcs, corner.as_ref(), &mut log, &mut progress) {
+        let done = convert_file(&input, &output, arcs, corner.as_ref(), &mut log, &mut progress);
+        if !buf.is_empty() {
+            let _ = a_log.emit("convert-log", LogMsg { line: buf.join("\n") });
+        }
+        match done {
             Ok(mins) => {
                 let _ = a_end.emit("convert-done", DoneMsg { minutes: mins, output });
             }
@@ -291,6 +314,20 @@ mod tests {
     #[test]
     fn empty_input_is_rejected() {
         assert_eq!(check_input_plan("").unwrap_err(), "No input file selected");
+    }
+
+    #[test]
+    fn log_batch_flushes_once_at_200_lines() {
+        let mut buf: Vec<String> = vec![];
+        for i in 0..199 {
+            buf.push(format!("Feed: F{i}"));
+            assert!(take_log_batch(&mut buf).is_none(), "flushed early at {i}");
+        }
+        buf.push("Feed: F199".to_string());
+        let joined = take_log_batch(&mut buf).expect("full buffer must flush");
+        assert_eq!(joined.lines().count(), 200);
+        assert!(joined.starts_with("Feed: F0\n") && joined.ends_with("Feed: F199"));
+        assert!(buf.is_empty() && take_log_batch(&mut buf).is_none());
     }
 
     #[test]
