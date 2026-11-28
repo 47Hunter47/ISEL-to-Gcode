@@ -213,7 +213,7 @@ pub struct PreviewReq {
     pub path: String,
     pub width: f32,
     pub height: f32,
-    pub iso: bool,
+    pub view: crate::preview::ViewDir,
     /// None asks the server to fit the view (window opened or resized).
     pub camera: Option<crate::preview::Camera>,
 }
@@ -224,7 +224,7 @@ pub async fn preview_view(
     cache: tauri::State<'_, GcodeCache>,
 ) -> Result<crate::preview::PreviewScene, String> {
     cache.with_parsed(&req.path, |d| {
-        Ok(crate::preview::scene(d, req.width, req.height, req.iso, req.camera.as_ref()))
+        Ok(crate::preview::scene(d, req.width, req.height, &req.view, req.camera.as_ref()))
     })
 }
 

@@ -43,11 +43,17 @@ export interface GcodeSummary {
   bounds: { min_x: number; max_x: number; min_y: number; max_y: number };
 }
 
+// commands::preview_view request; view mirrors preview.rs ViewDir (degrees).
+export interface ViewDir {
+  yaw_deg: number;
+  tilt_deg: number;
+}
+
 export interface PreviewReq {
   path: string;
   width: number;
   height: number;
-  iso: boolean;
+  view: ViewDir;
   camera: Camera | null;
 }
 

@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { api } from "./lib/api";
-import type { Camera, GcodeSummary, PreviewScene } from "./lib/types";
+import type { Camera, GcodeSummary, PreviewScene, ViewDir } from "./lib/types";
 
 // Canvas paints exactly what preview.rs projects, redrawn under a single
 // client-side translate+scale: screen' = cam.ox + (cam.scale/base.scale) *
@@ -12,16 +12,20 @@ import type { Camera, GcodeSummary, PreviewScene } from "./lib/types";
 // from the base camera the server fitted. So the 3-line anchor zoom (mirror
 // of preview.rs's zoom_at, pinned by preview.rs's test) and panning stay
 // client-side and never re-project points or cross IPC; the server scene is
-// only re-requested for a new file, the ISO toggle, a resize refit, or Fit.
-// The label color mirrors preview.rs's python-side TEXT_FAINT (#2F5F73).
+// only re-requested for a new file, a view change (ISO toggle or middle-drag
+// orbit), a resize refit, or Fit. The label color mirrors preview.rs's
+// python-side TEXT_FAINT (#2F5F73).
 const LABEL_COLOR = "#2F5F73";
+// preset views; the angles must match VIEW_TOP/VIEW_ISO in preview.rs
+const VIEW_TOP: ViewDir = { yaw_deg: 0.0, tilt_deg: -90.0 };
+const VIEW_ISO: ViewDir = { yaw_deg: 45.0, tilt_deg: 35.264389682751755 };
 const nf = new Intl.NumberFormat("en-US");
 
 const pathFromUrl = () => new URLSearchParams(window.location.search).get("p") ?? "";
 
 export default function PreviewPage() {
   const [path, setPath] = useState(pathFromUrl);
-  const [iso, setIso] = useState(false);
+  const [view, setView] = useState<ViewDir>(VIEW_TOP);
   const [scene, setScene] = useState<PreviewScene | null>(null);
   const [stats, setStats] = useState<GcodeSummary | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -29,17 +33,17 @@ export default function PreviewPage() {
   const camRef = useRef<Camera | null>(null); // null asks the server to fit
   // Latest-request-wins queue: every view change bumps want.rev with the state
   // to request. One IPC flight at a time; after each response the flight
-  // re-reads want, so a newer path/iso/camera always runs — a request is never
+  // re-reads want, so a newer path/view/camera always runs — a request is never
   // dropped and never replayed from a stale closure. A response may adopt its
   // server camera only when its request asked for a fit (cam null); otherwise
   // the camera on screen is the user's and an obsolete response must not roll
   // back a pan/zoom that happened mid-flight (preview.rs echoes sent cameras).
-  const want = useRef({ path: "", iso: false, cam: null as Camera | null, rev: 0 });
+  const want = useRef({ path: "", view: VIEW_TOP as ViewDir, cam: null as Camera | null, rev: 0 });
   const applied = useRef(0);
   const running = useRef(false);
   const drag = useRef<{ x: number; y: number } | null>(null);
 
-  const request = useCallback((patch?: { path?: string; iso?: boolean }) => {
+  const request = useCallback((patch?: { path?: string; view?: ViewDir }) => {
     if (patch) Object.assign(want.current, patch);
     want.current.cam = camRef.current;
     want.current.rev += 1;
@@ -56,7 +60,7 @@ export default function PreviewPage() {
             path: w.path,
             width: Math.max(1, Math.round(width)),
             height: Math.max(1, Math.round(height)),
-            iso: w.iso,
+            view: w.view,
             camera: w.cam,
           });
           applied.current = w.rev;
@@ -150,8 +154,8 @@ export default function PreviewPage() {
 
   useEffect(() => {
     camRef.current = null; // new file or view change: refit
-    request({ path, iso });
-  }, [path, iso, request]);
+    request({ path, view });
+  }, [path, view, request]);
 
   // refit when the window resizes, like the old rect-change refit
   useEffect(() => {
@@ -193,6 +197,28 @@ export default function PreviewPage() {
   }, [schedulePaint]);
 
   const onMouseDown = (e: React.MouseEvent) => {
+    if (e.button === 1) {
+      // middle drag orbits: dx yaws, dy tilts between top (-90) and edge-on
+      // (90); each landed angle re-fits through the normal request queue
+      e.preventDefault(); // WebView2 autoscroll/paste fights a middle drag
+      let x = e.clientX, y = e.clientY;
+      const onMove = (ev: MouseEvent) => {
+        const dx = ev.clientX - x, dy = ev.clientY - y;
+        x = ev.clientX; y = ev.clientY;
+        setView((v) => ({
+          yaw_deg: v.yaw_deg + dx * 0.4,
+          tilt_deg: Math.min(90, Math.max(-90, v.tilt_deg + dy * 0.4)),
+        }));
+      };
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+      return;
+    }
+    if (e.button !== 0) return; // left = pan, as before
     drag.current = { x: e.clientX, y: e.clientY };
     const onMove = (ev: MouseEvent) => {
       const cam = camRef.current;
@@ -242,9 +268,9 @@ export default function PreviewPage() {
         <div className="flex items-center gap-2">
           <Checkbox
             id="iso"
-            checked={iso}
+            checked={view.yaw_deg === VIEW_ISO.yaw_deg && view.tilt_deg === VIEW_ISO.tilt_deg}
             onCheckedChange={(c) => {
-              setIso(c === true); // the camera survives the toggle, like the egui version
+              setView(c === true ? VIEW_ISO : VIEW_TOP); // preset; middle-drag can leave custom angles
             }}
           />
           <Label htmlFor="iso" className="font-normal">
