@@ -11,7 +11,7 @@ import { Separator } from "@/components/ui/separator";
 import { FileCog, Info, Loader2 } from "lucide-react";
 import Titlebar from "./Titlebar";
 import { api } from "./lib/api";
-import type { DoneMsg, FailedMsg, LogMsg, ProgressMsg } from "./lib/types";
+import type { CornerParams, DoneMsg, FailedMsg, LogMsg, ProgressMsg } from "./lib/types";
 
 // Log/status strings below are kept byte-identical to the egui app's python
 // port (spacing included); the reference program's wording is the contract.
@@ -35,6 +35,16 @@ const stem = (path: string) => {
 
 const modeLabel = (arcs: boolean) => (arcs ? "G2/G3 arc commands" : "G1 linearised");
 
+// scalar knobs of the corner editor; the profile table is rendered separately
+const CORNER_FIELDS = [
+  { key: "windowMm", label: "Direction window (mm)" },
+  { key: "minTurnDeg", label: "Min turn angle (°)" },
+  { key: "spikeRatio", label: "Corner concentration ratio" },
+  { key: "rampMaxSegMm", label: "Max ramp segment (mm)" },
+  { key: "rampMix", label: "Ramp-out mix (0–1)" },
+  { key: "arcFullRadiusMm", label: "Full-feed arc radius (mm)" },
+] as const;
+
 // sidebar nav: the converter is the app; "about" gives the fluent nav pattern
 // real content instead of a fake second page
 const NAV = [
@@ -48,6 +58,8 @@ export default function App() {
   const [input, setInput] = useState("");
   const [useArc, setUseArc] = useState(false);
   const [corner, setCorner] = useState(false);
+  // edited corner policy; seeded from Rust so the defaults are never duplicated
+  const [cornerParams, setCornerParams] = useState<CornerParams | null>(null);
   const [log, setLog] = useState<string[]>(initialLog);
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState("Ready");
@@ -61,8 +73,8 @@ export default function App() {
 
   const busy = converting || waitingDialog;
   // mirrors for the async callbacks (state inside closures goes stale)
-  const vals = useRef({ input, useArc, corner });
-  vals.current = { input, useArc, corner };
+  const vals = useRef({ input, useArc, corner, cornerParams });
+  vals.current = { input, useArc, corner, cornerParams };
   const busyRef = useRef(false); // drag/drop lives outside React state flow
   busyRef.current = busy;
   const startingRef = useRef(false); // re-entry guard for convert()
@@ -70,6 +82,26 @@ export default function App() {
   const logBox = useRef<HTMLDivElement>(null);
 
   const pushLog = (line: string) => setLog((l) => [...l, line]);
+
+  const setCornerScalar = (key: Exclude<keyof CornerParams, "profile">, text: string) => {
+    const n = Number(text);
+    // ignore the NaN of a half-typed/emptied field; the converter clamps range
+    // anyway, so keeping the last number beats inventing one here
+    if (Number.isFinite(n)) setCornerParams((p) => p && { ...p, [key]: n });
+  };
+
+  const setProfileRow = (i: number, col: 0 | 1, text: string) => {
+    const n = Number(text);
+    if (!Number.isFinite(n)) return;
+    setCornerParams((p) =>
+      p && {
+        ...p,
+        profile: p.profile.map((r, j): [number, number] =>
+          j === i ? (col === 0 ? [n, r[1]] : [r[0], n]) : r,
+        ),
+      },
+    );
+  };
 
   const browse = async () => {
     setWaitingDialog(true);
@@ -189,7 +221,7 @@ export default function App() {
       }
 
       try {
-        await api.convert(v.input, out, v.useArc, v.corner);
+        await api.convert(v.input, out, v.useArc, v.corner, v.corner ? v.cornerParams : null);
       } catch (e) {
         setConverting(false);
         setStatus("Error occurred");
@@ -216,6 +248,8 @@ export default function App() {
   useEffect(() => {
     if (!isTauri) return; // bare-browser peek: no IPC host to talk to
     api.getVersion().then(setVersion).catch(() => setVersion("?"));
+    // seed the About editor; if the defaults cannot be fetched it stays hidden
+    api.getCornerDefaults().then(setCornerParams).catch(() => {});
     api.getPrefill().then((p) => {
       if (p) {
         setInput(p);
@@ -341,14 +375,63 @@ export default function App() {
           </div>
 
           {page === "about" ? (
-            <section className="fluent-card select-text mt-4">
-              <div>ISEL &rarr; G-code Converter v{version}</div>
-              <div className="mt-2">Developed by ISIN Heaters Ltd.</div>
-              <div className="mt-2 text-zinc-400">Converts ISEL/CAM and Fanuc-format programs to G-code for CNC milling machines.</div>
-              <div className="mt-2 font-mono text-[12px] text-zinc-300">
-                CLI: ISEL_to_Gcode.exe convert in.isel out.ngc [--arcs] [--corners]
-              </div>
-            </section>
+            <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pt-4">
+              <section className="fluent-card select-text">
+                <div>ISEL &rarr; G-code Converter v{version}</div>
+                <div className="mt-2">Developed by ISIN Heaters Ltd.</div>
+                <div className="mt-2 text-zinc-400">Converts ISEL/CAM and Fanuc-format programs to G-code for CNC milling machines.</div>
+                <div className="mt-2 font-mono text-[12px] text-zinc-300">
+                  CLI: ISEL_to_Gcode.exe convert in.isel out.ngc [--arcs] [--corners]
+                </div>
+              </section>
+              {corner && cornerParams && (
+                <section className="fluent-card select-text">
+                  <Label className="text-[11px] tracking-widest text-zinc-500">CORNER FEED PARAMETERS</Label>
+                  <div className="mt-1 text-[12px] text-zinc-400">
+                    Shown while Corner Feed Reduction is on; applied to the next conversion. The converter clamps every value to a usable range.
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2">
+                    {CORNER_FIELDS.map((f) => (
+                      <label key={f.key} className="block">
+                        <span className="text-[12px] text-zinc-400">{f.label}</span>
+                        <Input
+                          type="number"
+                          step="any"
+                          className="mt-1 bg-[#1f1f1f] font-mono text-[12px] text-zinc-100"
+                          value={cornerParams[f.key]}
+                          onChange={(e) => setCornerScalar(f.key, e.target.value)}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                  <div className="mt-4">
+                    <span className="text-[12px] text-zinc-400">
+                      Feed profile — turn angle (°) &rarr; feed factor, linear between rows
+                    </span>
+                    <div className="mt-1 grid grid-cols-3 gap-x-4 gap-y-1">
+                      {cornerParams.profile.map((row, i) => (
+                        <div key={i} className="flex items-center gap-1">
+                          <Input
+                            type="number"
+                            step="any"
+                            className="w-20 bg-[#1f1f1f] font-mono text-[12px] text-zinc-100"
+                            value={row[0]}
+                            onChange={(e) => setProfileRow(i, 0, e.target.value)}
+                          />
+                          <Input
+                            type="number"
+                            step="any"
+                            className="w-20 bg-[#1f1f1f] font-mono text-[12px] text-zinc-100"
+                            value={row[1]}
+                            onChange={(e) => setProfileRow(i, 1, e.target.value)}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </section>
+              )}
+            </div>
           ) : (
             <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pt-4">
               <section className="fluent-card shrink-0">

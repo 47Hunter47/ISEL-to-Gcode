@@ -36,7 +36,7 @@ SolidWorks CAM post output) into standard G-code (NC) programs for CNC machines.
    or drop the file onto the `ISEL_to_Gcode.exe` icon). The format is detected from the file
    itself.
 4. Optionally enable **Use G2/G3 arc commands** if your controller supports arcs.
-5. Optionally enable **Corner Feed Reduction** to slow the machine down around sharp corners. Leave it off if your parts are mostly short zig-zag passes — every turn is a corner there, so the program takes noticeably longer.
+5. Optionally enable **Corner Feed Reduction** to slow the machine down around sharp corners. Leave it off if your parts are mostly short zig-zag passes — every turn is a corner there, so the program takes noticeably longer. While it is enabled, the **About** page shows every slowdown distance and ratio as its own field; change one there and the next conversion uses it (values outside the usable range are corrected automatically).
 6. Click **Convert** and choose a save location (`.ngc`).
 7. Open **Preview** to inspect the toolpath before running the program.
 

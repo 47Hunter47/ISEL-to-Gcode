@@ -500,7 +500,7 @@ pub fn convert_file(
     in_path: &str,
     out_path: &str,
     use_arc: bool,
-    corner: bool,
+    corner: Option<&crate::corner::CornerParams>,
     log: &mut dyn FnMut(&str),
     progress: &mut Option<Box<dyn FnMut(f64, &str)>>,
 ) -> Result<f64, String> {
@@ -539,17 +539,17 @@ pub fn convert_file(
     }
 
     // Corner feed reduction needs the whole XY toolpath before the first G-code
-    // line is written, so it is planned here. Off => nothing below changes.
+    // line is written, so it is planned here. Off (None) => nothing below changes.
     // G2/G3 mode is excluded: arc fitting consumes points and rewrites motion,
     // so the G1 corner geometry would no longer describe the emitted path.
-    let plan = if corner && use_arc {
+    let plan = if corner.is_some() && use_arc {
         log("Corner feed reduction: not applied in G2/G3 arc mode (G1 only)");
         None
-    } else if corner {
+    } else if let Some(cp) = corner {
         if let Some(p) = progress {
             p(0.0, "Analyzing corner geometry\u{2026}");
         }
-        let plan = crate::corner::analyze(&text);
+        let plan = crate::corner::analyze_with(&text, cp);
         log(&format!(
             "Corner feed reduction: {} corner(s), {} curved section(s), {} movement(s) at reduced feed",
             plan.corners,

@@ -112,7 +112,10 @@ pub async fn convert(
     output: String,
     arcs: bool,
     corners: bool,
+    params: Option<crate::corner::CornerParams>,
 ) -> Result<(), String> {
+    // The toggle is the bool; the edited parameters ride along when it is on.
+    let corner = corners.then(|| params.unwrap_or_default());
     let (a_log, a_prog, a_end) = (app.clone(), app.clone(), app.clone());
     let out_for_cache = output.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -124,7 +127,7 @@ pub async fn convert(
                 let _ = a_prog.emit("convert-progress", ProgressMsg { percent: p, text: t.to_string() });
             },
         ));
-        match convert_file(&input, &output, arcs, corners, &mut log, &mut progress) {
+        match convert_file(&input, &output, arcs, corner.as_ref(), &mut log, &mut progress) {
             Ok(mins) => {
                 let _ = a_end.emit("convert-done", DoneMsg { minutes: mins, output });
             }
@@ -155,6 +158,13 @@ pub fn get_prefill(state: tauri::State<'_, Prefill>) -> Option<String> {
 #[tauri::command]
 pub fn get_version() -> &'static str {
     crate::app::APP_VERSION
+}
+
+/// Seeds the corner-parameter editor on the About page. The defaults live in
+/// `corner.rs`; a second copy in the front end would drift.
+#[tauri::command]
+pub fn get_corner_defaults() -> crate::corner::CornerParams {
+    crate::corner::CornerParams::default()
 }
 
 /// gcode::Counts + gcode::Bounds: everything the preview window's stats bar

@@ -66,3 +66,16 @@ export interface DoneMsg {
 export interface FailedMsg {
   error: string;
 }
+
+// Corner feed reduction policy — mirrors CornerParams in src-tauri/src/corner.rs
+// (camelCase via serde rename). get_corner_defaults supplies the numbers; this
+// file must not copy them, or the two copies would drift.
+export interface CornerParams {
+  windowMm: number;
+  minTurnDeg: number;
+  spikeRatio: number;
+  rampMaxSegMm: number;
+  rampMix: number;
+  arcFullRadiusMm: number;
+  profile: [number, number][];
+}

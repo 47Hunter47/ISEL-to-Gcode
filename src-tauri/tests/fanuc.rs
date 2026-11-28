@@ -58,7 +58,7 @@ fn fx(name: &str) -> String {
         let out = dir.join(format!("isel_fanuc_{}_{}_o.ngc", name, pid));
         std::fs::write(&inp, content).unwrap();
         let mut none: Option<Box<dyn FnMut(f64, &str)>> = None;
-        let t = convert_file(inp.to_str().unwrap(), out.to_str().unwrap(), arc, false,
+        let t = convert_file(inp.to_str().unwrap(), out.to_str().unwrap(), arc, None,
                              &mut |_: &str| {}, &mut none).unwrap();
         let ngc = std::fs::read_to_string(&out).unwrap();
         std::fs::remove_file(&inp).ok(); std::fs::remove_file(&out).ok();
@@ -116,7 +116,7 @@ fn must_err(src: &str, needle: &str) {
     let out = dir.join(format!("isel_fanuc_rt_{}.ngc", std::process::id()));
     std::fs::write(&inp, "O1\nG00 X0.\nG01 X1. F333.33\nM30\n").unwrap();
     let mut none: Option<Box<dyn FnMut(f64, &str)>> = None;
-    convert_file(inp.to_str().unwrap(), out.to_str().unwrap(), false, false,
+    convert_file(inp.to_str().unwrap(), out.to_str().unwrap(), false, None,
                  &mut |_: &str| {}, &mut none).unwrap();
     let ngc = std::fs::read_to_string(&out).unwrap();
     assert!(ngc.contains("F333"), "F must round-trip: {}", ngc);

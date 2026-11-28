@@ -73,6 +73,7 @@ pub fn run_with(prefill: Option<String>) {
             commands::convert,
             commands::get_prefill,
             commands::get_version,
+            commands::get_corner_defaults,
             commands::preview_stats,
             commands::preview_view,
             commands::open_preview_window

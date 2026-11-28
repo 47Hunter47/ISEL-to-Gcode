@@ -9,12 +9,16 @@ fn main() {
     if args.len() >= 4 && args[1] == "convert" {
         let flags = &args[4.min(args.len())..];
         let arc = flags.iter().any(|a| a == "--arcs");
-        let corner = flags.iter().any(|a| a == "--corners");
+        // The CLI has no UI to edit the policy: --corners runs the built-in defaults.
+        let corner = flags
+            .iter()
+            .any(|a| a == "--corners")
+            .then(isel_to_gcode::corner::CornerParams::default);
         let mut log = |m: &str| println!("{}", m);
         let mut progress: Option<Box<dyn FnMut(f64, &str)>> =
             Some(Box::new(|p: f64, t: &str| eprintln!("PROGRESS {:.1} {}", p, t)));
         match isel_to_gcode::convert::convert_file(
-            &args[2], &args[3], arc, corner, &mut log, &mut progress,
+            &args[2], &args[3], arc, corner.as_ref(), &mut log, &mut progress,
         ) {
             Ok(mins) => {
                 println!("TIME {}", mins);

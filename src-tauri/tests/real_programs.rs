@@ -18,7 +18,7 @@ fn run(name: &str, arc: bool, golden: &str, want_time: f64) {
     ));
     let mut none: Option<Box<dyn FnMut(f64, &str)>> = None;
     let mut silent = |_: &str| {};
-    let t = convert_file(&fx(&format!("{}.isel", name)), out.to_str().unwrap(), arc, false, &mut silent, &mut none)
+    let t = convert_file(&fx(&format!("{}.isel", name)), out.to_str().unwrap(), arc, None, &mut silent, &mut none)
         .unwrap_or_else(|e| panic!("{} convert failed: {}", name, e));
 
     let got = std::fs::read(&out).unwrap();

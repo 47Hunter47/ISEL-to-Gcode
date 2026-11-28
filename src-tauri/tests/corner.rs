@@ -1,6 +1,6 @@
 // Corner feed reduction: the toolpath is immutable, only F values may change.
 use isel_to_gcode::convert::convert_file;
-use isel_to_gcode::corner::{CornerPlan, analyze, factor_for};
+use isel_to_gcode::corner::{CornerPlan, CornerParams, analyze, analyze_with, factor_for};
 
 /// Exact base feed of `VEL 16667`: the reference converter divides by 16.6667,
 /// so the true value is 1000.018 — printed as F1000, and *time is the printed
@@ -40,7 +40,7 @@ fn run(text: &str, arc: bool, corner: bool) -> (String, Vec<String>, f64) {
         inp.to_str().unwrap(),
         outp.to_str().unwrap(),
         arc,
-        corner,
+        corner.then(CornerParams::default).as_ref(),
         &mut |m: &str| logs.push(m.to_string()),
         &mut none,
     );
@@ -978,4 +978,93 @@ fn closed_circle_is_classified_by_its_radius() {
     let min_factor = p.factors.values().copied().fold(1.0f64, f64::min);
     assert!(p.arcs > 0, "closed circle was not classified as a curved section");
     assert!(min_factor < 0.8, "R=2 mm circle did not receive meaningful reduction: {min_factor}");
+}
+
+// ── edited parameters ──────────────────────────────────────────────────────
+#[test]
+fn edited_profile_changes_the_corner_feed() {
+    // A 90 deg corner reads 0.40 with the frozen profile; the same profile
+    // written with 0.2 must run the two corner segments at 0.2. The rows are
+    // given unsorted, so this also pins that the analysis cleans them.
+    let mut p = CornerParams::default();
+    p.profile = vec![(180.0, 0.2), (90.0, 0.2), (0.0, 1.0)];
+    let plan = analyze_with(
+        &prog(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (10.0, 20.0)]),
+        &p,
+    );
+    assert!((seg(&plan, 0) - 0.2).abs() < 1e-12);
+    assert!((seg(&plan, 1) - 0.2).abs() < 1e-12);
+    // The segment after the corner is 10 mm, over the ramp limit: full feed.
+    assert_eq!(seg(&plan, 2), 1.0);
+}
+
+#[test]
+fn default_params_reproduce_the_frozen_analysis() {
+    let t = prog(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (20.0, 10.0)]);
+    assert_eq!(
+        analyze(&t).factors,
+        analyze_with(&t, &CornerParams::default()).factors
+    );
+}
+
+#[test]
+fn ramp_mix_moves_the_exit_step() {
+    // 90 deg corner with a 2 mm exit segment: the default mix 0.5 puts the
+    // half-way 0.7 there; mix 0.0 steps straight back to full feed while the
+    // two corner segments stay at 0.4.
+    let pts = [(0.0, 0.0), (4.0, 0.0), (4.0, 2.0), (4.0, 4.0)];
+    let d = analyze(&prog(&pts));
+    assert!((seg(&d, 2) - 0.7).abs() < 1e-12);
+    let mut p = CornerParams::default();
+    p.ramp_mix = 0.0;
+    let plan = analyze_with(&prog(&pts), &p);
+    assert!((seg(&plan, 0) - 0.4).abs() < 1e-12);
+    assert!((seg(&plan, 1) - 0.4).abs() < 1e-12);
+    assert_eq!(seg(&plan, 2), 1.0);
+}
+
+#[test]
+fn edited_parameters_are_clamped_to_survivable_values() {
+    let bad = CornerParams {
+        window_mm: 0.0,
+        min_turn_deg: -5.0,
+        spike_ratio: 0.1,
+        ramp_max_seg_mm: -1.0,
+        ramp_mix: 9.0,
+        arc_full_radius_mm: 0.0,
+        profile: vec![(180.0, 2.0)],
+    }
+    .cleaned();
+    assert!((0.05..=20.0).contains(&bad.window_mm));
+    assert!((1.0..=90.0).contains(&bad.min_turn_deg));
+    assert!((1.0..=10.0).contains(&bad.spike_ratio));
+    assert!(bad.ramp_max_seg_mm >= 0.0);
+    assert!((0.0..=1.0).contains(&bad.ramp_mix));
+    assert!(bad.arc_full_radius_mm >= 0.05);
+    // The profile gets its 0 deg head and 180 deg tail back and never rises
+    // above 1: an angle below the first stop must not extrapolate above 1.
+    assert_eq!(bad.profile.first(), Some(&(0.0, 1.0)));
+    assert_eq!(bad.profile.last().map(|r| r.0), Some(180.0));
+    assert!(bad.profile.iter().all(|&(_, f)| f <= 1.0));
+    // The clamped profile through a real analysis: a flat 100 % profile on a
+    // 90 deg corner reduces nothing.
+    let plan = analyze_with(&prog(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]), &bad);
+    assert!(plan.factors.is_empty());
+}
+
+#[test]
+fn ui_wire_shape_is_camel_case_with_defaults_filled_in() {
+    // pins the contract with src/lib/types.ts: what the About editor sends
+    // must deserialize, missing keys must fall back to the defaults
+    let p: CornerParams = serde_json::from_str(
+        r#"{"windowMm":2.0,"profile":[[0.0,1.0],[90.0,0.5],[180.0,0.5]]}"#,
+    )
+    .unwrap();
+    assert_eq!(p.window_mm, 2.0);
+    assert_eq!(p.min_turn_deg, 12.0);
+    assert_eq!(p.spike_ratio, 1.7);
+    let json = serde_json::to_string(&CornerParams::default()).unwrap();
+    assert!(json.contains("\"windowMm\""));
+    assert!(json.contains("\"arcFullRadiusMm\""));
+    assert!(!json.contains("window_mm"));
 }
